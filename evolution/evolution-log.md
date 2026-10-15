@@ -20,7 +20,42 @@ rg "^\| timestamp" evolution/evolution-log.md
 
 | timestamp | goal | branch | outcome |
 |---|---|---|---|
+| 2026-10-15 23:33Z | evolution-probes | (main) | merged (S2 scaffold) |
 | 2026-10-15 23:18Z | harness-journal | evolve/harness-journal-20261015 | merged (pre-S2 baseline) |
+
+---
+
+## 2026-10-15 — S2 scaffold: evolution/ + probes/ + append-only log
+
+- **timestamp**: 2026-10-15T23:33Z
+- **commit**: `36171db`
+- **goal**: lay down the candidate-tree + probe-scoring engine so every
+  subsequent attempt has a real before/after signal to be decided on.
+- **hypothesis**: four narrow assertions-heavy probes that exercise
+  schema strictness, module loading, footer arithmetic and harness-
+  journal arithmetic cover the load-bearing parts of the harness
+  without paying the cost of LLM-as-judge.
+- **change summary**: 7 new files / +815 lines:
+  - `evolution/README.md` (protocol + branch convention)
+  - `evolution/evolution-log.md` (append-only journal)
+  - `evolution/probes/run.mjs` (orchestrator)
+  - `evolution/probes/schema-strict.mjs` (23 assertions)
+  - `evolution/probes/extensions-load.mjs` (14 assertions)
+  - `evolution/probes/footer-arithmetic.mjs` (32 assertions)
+  - `evolution/probes/harness-journal-arithmetic.mjs` (44 assertions)
+- **probe baseline** (this commit, on a clean `main`):
+  ```
+  schema-strict               ✓ 100/100    26.1 ms
+  extensions-load             ✓ 100/100  1769.1 ms
+  footer-arithmetic           ✓ 100/100     0.2 ms
+  harness-journal-arithmetic  ✓ 100/100     1.7 ms
+  aggregate: 100/100 · total: 1.80s · PASS
+  ```
+- **outcome**: ✅ merged into `main` (no branch — a scaffold is
+  not a candidate).
+- **next**: pick the first real candidate (e.g. a small footer-
+  arithmetic polish), branch `evolve/<goal>-20261015`, run the
+  loop, and write a section here comparing baseline vs candidate.
 
 ---
 
