@@ -50,6 +50,7 @@ interface CachedStats {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	reasoning: number;
 	/** session start timestamp (Date.now() at session_start) */
 	startedAt: number;
 }
@@ -64,6 +65,7 @@ function emptyCached(): CachedStats {
 		output: 0,
 		cacheRead: 0,
 		cacheWrite: 0,
+		reasoning: 0,
 		startedAt: 0,
 	};
 }
@@ -101,12 +103,13 @@ export function createFooterOverrideExtension(options: FooterOverrideOptions = {
 			const s = getStats(context);
 			s.turns += 1;
 			s.messages += 1;
-			const usage = (event.message as { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } }).usage;
+			const usage = (event.message as { usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; reasoning?: number } }).usage;
 			if (usage) {
 				s.input += usage.input ?? 0;
 				s.output += usage.output ?? 0;
 				s.cacheRead += usage.cacheRead ?? 0;
 				s.cacheWrite += usage.cacheWrite ?? 0;
+				s.reasoning += usage.reasoning ?? 0;
 			}
 		});
 
@@ -142,6 +145,7 @@ export function createFooterOverrideExtension(options: FooterOverrideOptions = {
 				output: s.output,
 				cacheRead: s.cacheRead,
 				cacheWrite: s.cacheWrite,
+				reasoning: s.reasoning,
 				turns: s.turns,
 				messages: s.messages,
 				tokens: s.tokens ?? 0,
@@ -262,8 +266,10 @@ class OverrideFooter {
 
 	private renderHoverDetail(width: number, stats: CachedStats): string {
 		const t = this.theme;
-		const total = stats.input + stats.output;
-		const cacheMiss = Math.max(0, stats.input - stats.cacheRead);
+		// 与 renderTokenSummaryEntry 同一语义：input 已剔除缓存，未命中 = input 本身
+		const totalIn = stats.input + stats.cacheRead + stats.cacheWrite;
+		const total = totalIn + stats.output;
+		const cacheMiss = stats.input;
 		const icon = this.pinned ? "📌" : "👁";
 		const header = `${icon} ${t.bold("Token 消耗明细")}`;
 		const headerRight = `${t.fg("muted", "总计")} ${t.fg("accent", formatTokens(total))}`;
@@ -271,7 +277,7 @@ class OverrideFooter {
 		const line1 = layoutRow(header, headerRight, width);
 		const inputLine = layoutRow(
 			t.fg("accent", "▍输入"),
-			t.fg("accent", formatTokens(stats.input)),
+			t.fg("accent", formatTokens(totalIn)),
 			width,
 			2,
 		);
@@ -287,8 +293,8 @@ class OverrideFooter {
 			2,
 		);
 		const outputSubs = [
-			`    ${t.fg("muted", "▍思考过程")}      ${t.fg("dim", formatTokens(0))}`,
-			`    ${t.fg("muted", "▍回复内容")}      ${t.fg("dim", formatTokens(stats.output))}`,
+			`    ${t.fg("muted", "▍思考过程")}      ${t.fg("dim", formatTokens(stats.reasoning))}`,
+			`    ${t.fg("muted", "▍回复内容")}      ${t.fg("dim", formatTokens(Math.max(0, stats.output - stats.reasoning)))}`,
 		].map((l) => truncateToWidth(l, width, "..."));
 		const hit = hitRate(stats);
 		const hitLine = layoutRow(
@@ -304,7 +310,7 @@ class OverrideFooter {
 		const meta = t.fg(
 			"dim",
 			// hover 面板底部对齐设计稿：Tokens + 耗时（不含 turns/msgs 消息数）
-			`Tokens: ${formatTokens(stats.input + stats.output)}` +
+			`Tokens: ${formatTokens(total)}` +
 				(stats.startedAt > 0 ? ` · 耗时 ${formatDuration(Date.now() - stats.startedAt)}` : ""),
 		);
 		return [
@@ -363,7 +369,7 @@ function truncateCwd(cwd: string, home: string | undefined): string {
 }
 
 function hitRate(stats: CachedStats): string {
-	const denom = stats.input + stats.cacheRead;
+	const denom = stats.input + stats.cacheRead + stats.cacheWrite;
 	if (denom <= 0) return "0.0%";
 	return `${((stats.cacheRead / denom) * 100).toFixed(1)}%`;
 }
@@ -420,6 +426,7 @@ interface TokenSummaryData {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	reasoning: number;
 	turns: number;
 	messages: number;
 	tokens: number;
@@ -434,17 +441,23 @@ function renderTokenSummaryEntry(entry: { data?: TokenSummaryData }, _options: {
 	const data = entry.data;
 	if (!data) return undefined;
 	const t = theme;
-	const cacheMiss = Math.max(0, data.input - data.cacheRead);
-	const total = data.input + data.output;
-	const hit = data.input + data.cacheRead > 0
-		? `${((data.cacheRead / (data.input + data.cacheRead)) * 100).toFixed(1)}%`
+	// pi 的 usage 语义（OpenAI 兼容 provider，见 parseChunkUsage）：
+	//   input     = prompt_tokens − cached_tokens − cache_write_tokens（未走缓存的输入）
+	//   cacheRead = cached_tokens（缓存命中）
+	//   cacheWrite= cache_write_tokens（多数 provider 不上报 → 0 = 未报告）
+	// 因此「未命中」就是 input 本身；真实总输入 = input + cacheRead + cacheWrite。
+	const cacheMiss = data.input;
+	const totalIn = data.input + data.cacheRead + data.cacheWrite;
+	const total = totalIn + data.output;
+	const hit = totalIn > 0
+		? `${((data.cacheRead / totalIn) * 100).toFixed(1)}%`
 		: "0.0%";
 
 	// Try to render with a Box background; fall back to plain Text if the
 	// theme doesn't have a customMessageBackground colour.
 	let box: Box;
 	try {
-		box = new Box(1, 1, (text) => t.bg("customMessageBackground", text));
+		box = new Box(1, 1, (text) => t.bg("customMessageBg", text));
 	} catch {
 		box = new Box(1, 1, (text) => text);
 	}
@@ -454,7 +467,7 @@ function renderTokenSummaryEntry(entry: { data?: TokenSummaryData }, _options: {
 	));
 	box.addChild(new Text("", 0, 0));
 	box.addChild(new Text(
-		`${t.fg("accent", "▍输入")}    ${t.fg("muted", formatTokens(data.input))}`,
+		`${t.fg("accent", "▍输入")}    ${t.fg("muted", formatTokens(totalIn))}`,
 		0, 0,
 	));
 	box.addChild(new Text(
@@ -474,11 +487,11 @@ function renderTokenSummaryEntry(entry: { data?: TokenSummaryData }, _options: {
 		0, 0,
 	));
 	box.addChild(new Text(
-		`  ${t.fg("muted", "▍思考过程")}      ${t.fg("dim", formatTokens(0))}`,
+		`  ${t.fg("muted", "▍思考过程")}      ${t.fg("dim", formatTokens(data.reasoning))}`,
 		0, 0,
 	));
 	box.addChild(new Text(
-		`  ${t.fg("muted", "▍回复内容")}      ${t.fg("dim", formatTokens(data.output))}`,
+		`  ${t.fg("muted", "▍回复内容")}      ${t.fg("dim", formatTokens(Math.max(0, data.output - data.reasoning)))}`,
 		0, 0,
 	));
 	box.addChild(new Text("", 0, 0));

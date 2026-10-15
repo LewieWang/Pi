@@ -33,6 +33,8 @@ function install(): { captured: CapturedFooter } {
 			handlers.set(event, handler);
 		},
 		registerTool: () => {},
+		registerEntryRenderer: () => {},
+		appendEntry: () => {},
 	} as never as Parameters<ReturnType<typeof createFooterOverrideExtension>>[0];
 
 	const ext = createFooterOverrideExtension();
@@ -100,8 +102,10 @@ describe("Footer Override", () => {
 		const lines = footer.render(120);
 		const joined = lines.join("\n");
 		a.ok(joined.includes("👁"), "hover detail visible on move");
-		a.ok(joined.includes("in "), "hover shows input tokens");
-		a.ok(joined.includes("turns "), "hover shows turn count");
+		a.ok(joined.includes("输入"), "hover shows input row");
+		a.ok(joined.includes("缓存命中"), "hover shows cache hit row");
+		a.ok(joined.includes("Tokens:"), "hover shows tokens summary");
+		a.ok(!joined.includes("turns"), "turn count excluded by design");
 	});
 
 	test("click pins the detail line", () => {

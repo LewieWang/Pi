@@ -13,6 +13,8 @@ import { dirname, join } from "node:path";
 import { homedir as osHomedir } from "node:os";
 
 const JOURNAL_PATH = join(osHomedir(), ".pi", "agent", "decisions.jsonl");
+/** Default decisions.jsonl path — harness-journal reads decision windows from it. */
+export const DEFAULT_JOURNAL_PATH = JOURNAL_PATH;
 
 /**
  * Format a Date as a wall-clock string in the *local* timezone, including
@@ -44,6 +46,23 @@ export type JournalEvent =
 	// Config / tools
 	| { kind: "config_loaded"; config: Record<string, unknown> }
 	| { kind: "tools_registered"; names: readonly string[] }
+	// Harness Journal
+	| { kind: "harness_journal_init"; sessionId: string; fingerprint: string; fileCount: number; dir: string }
+	| {
+			kind: "harness_journal_score";
+			sessionId: string;
+			fingerprint: string;
+			turns: number;
+			input: number;
+			output: number;
+			cacheRead: number;
+			cacheWrite: number;
+			reasoning: number;
+			obsPacks: number;
+			reducerApplies: number;
+			fusions: number;
+	  }
+	| { kind: "harness_journal_failure"; op: string; reason: string }
 	// Action Fusion
 	| {
 			kind: "mutation";
