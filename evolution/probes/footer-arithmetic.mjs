@@ -31,6 +31,15 @@ const TOKENS_CASES = [
 	[5_500_000, "5.5M"],
 	[10_000_000, "10M"],
 	[50_000_000, "50M"],
+	// Billions bracket — added in evolve/format-tokens-billions-20261015
+	[999_999_999, "1000M"],
+	[1_000_000_000, "1.0B"],
+	[1_500_000_000, "1.5B"],
+	[2_000_000_000, "2.0B"],
+	[5_000_000_000, "5.0B"],
+	[9_999_999_999, "10.0B"],
+	[10_000_000_000, "10B"],
+	[50_000_000_000, "50B"],
 ];
 
 const DURATION_CASES = [
@@ -87,12 +96,12 @@ export async function run() {
 	}
 
 	// Monotonicity on numbers in the same band (no surprising collapses)
-	const monotonicInputs = [2000, 20_000, 200_000, 2_000_000, 20_000_000];
+	const monotonicInputs = [2000, 20_000, 200_000, 2_000_000, 20_000_000, 2_000_000_000, 20_000_000_000];
 	function normalize(s) {
-		const m = s.match(/^([0-9]+(?:\.[0-9]+)?)([kM]?)$/);
+		const m = s.match(/^([0-9]+(?:\.[0-9]+)?)([kMB]?)$/);
 		if (!m) return NaN;
 		const v = parseFloat(m[1]);
-		return m[2] === "k" ? v * 1e3 : m[2] === "M" ? v * 1e6 : v;
+		return m[2] === "k" ? v * 1e3 : m[2] === "M" ? v * 1e6 : m[2] === "B" ? v * 1e9 : v;
 	}
 	total++;
 	let monotonic = true;

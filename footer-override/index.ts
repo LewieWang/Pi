@@ -30,13 +30,25 @@ export interface FooterOverrideOptions {
 	readonly forceEnable?: boolean;
 }
 
-/** Mirror of pi's internal formatTokens (↑10.5K style). */
+/** Mirror of pi's internal formatTokens (↑10.5K style).
+ *  Extended in evolution/cycle-2026-10-15-format-tokens-billions to cover
+ *  the B (10^9) band — previously anything above ~100M rolled over to
+ *  "1000M" which is unreadable. The new brackets:
+ *    [1e3, 1e4)  ⇒ "X.Yk"   (1.0k .. 9.9k)
+ *    [1e4, 1e6)  ⇒ "Xk"     (10k .. 999k)
+ *    [1e6, 1e7)  ⇒ "X.YM"   (1.0M .. 9.9M)
+ *    [1e7, 1e9)  ⇒ "XM"     (10M .. 999M)
+ *    [1e9, 1e10) ⇒ "X.YB"   (1.0B .. 9.9B)   ← new
+ *    else         ⇒ "XB"     (10B+)
+ */
 function formatTokens(count: number): string {
 	if (count < 1e3) return count.toString();
 	if (count < 1e4) return `${(count / 1e3).toFixed(1)}k`;
 	if (count < 1e6) return `${Math.round(count / 1e3)}k`;
 	if (count < 1e7) return `${(count / 1e6).toFixed(1)}M`;
-	return `${Math.round(count / 1e6)}M`;
+	if (count < 1e9) return `${Math.round(count / 1e6)}M`;
+	if (count < 1e10) return `${(count / 1e9).toFixed(1)}B`;
+	return `${Math.round(count / 1e9)}B`;
 }
 
 interface CachedStats {
