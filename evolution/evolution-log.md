@@ -21,8 +21,53 @@ rg "^\| timestamp" evolution/evolution-log.md
 | timestamp | goal | branch | outcome |
 |---|---|---|---|
 | 2026-10-15 23:54Z | format-tokens-billions | evolve/format-tokens-billions-20261015 | merged (100/100) |
+| 2026-10-15 23:59Z | failure-smoke (regression seed) | evolve/failure-smoke-20261015 | rolled back (red line) |
 | 2026-10-15 23:33Z | evolution-probes | (main) | merged (S2 scaffold) |
 | 2026-10-15 23:18Z | harness-journal | evolve/harness-journal-20261015 | merged (pre-S2 baseline) |
+
+---
+
+## 2026-10-15 — S2 cycle 2 (smoke): deliberate regression → red-line trip
+
+- **timestamp**: 2026-10-15T23:59Z
+- **branch**: `evolve/failure-smoke-20261015` (kept as evidence; **never merged**)
+- **smoke commit**: `81a45b2` `smoke(failure): regress formatTokens
+  [1e3,1e4) to "BAD-N" (DO NOT MERGE)`
+- **goal**: prove that the S2 red line actually trips when an
+  evolution candidate breaks a probe-controlled invariant — i.e. the
+  system observably rejects a bad change the same way it would reject
+  one in production. This is the *must-pass* demo for the
+  regression-gate story.
+- **hypothesis under test**: dropping a bracket from `formatTokens`
+  would (a) be invisible to `npm test` because no test directly
+  probes that micro-rule, but (b) become immediately visible to the
+  `footer-arithmetic` probe whose case list covers every bracket.
+- **candidate change**: replaced the `[1e3, 1e4)` branch with
+  `return \`BAD-${count}\`;` — a deliberately wrong string suffix.
+  Other branches untouched.
+- **probe after**:
+  ```
+  schema-strict               ✓ 100/100     34.0 ms    (23/23)
+  extensions-load             ✓ 100/100  1757.7 ms    (14/14)
+  footer-arithmetic           ✗  88/100      0.2 ms    (5 of 40 failed)
+  harness-journal-arithmetic  ✓ 100/100      1.8 ms    (44/44)
+  aggregate: 97/100 · total: 1.80s · FAIL   (exit 1)
+  ```
+- **specific failures (verbatim)**:
+  ```
+  formatTokens(1000): expected "1.0k" got "BAD-1000"
+  formatTokens(1500): expected "1.5k" got "BAD-1500"
+  formatTokens(9500): expected "9.5k" got "BAD-9500"
+  formatTokens(9999): expected "10.0k" got "BAD-9999"
+  formatTokens not strictly monotonic: BAD-2000 < 20k < …
+  ```
+- **npm test**: 131/131 (still passes — yet another reason the probe
+  layer is needed; npm test does not exercise the formatter directly).
+- **decision**: **rollback** (red line tripped — score non-increasing
+  AND a probe flipped `pass`→`fail`). Branch is preserved for
+  evidence; `main` was not modified; the failure case is appended
+  to `evolution/failures/20261015-failure-smoke.md`.
+- **outcome**: ❌ rolled back. Red line verified.
 
 ---
 
