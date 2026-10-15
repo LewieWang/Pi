@@ -52,7 +52,9 @@ stdout and a summary table on stderr. Exit code 0 iff **all probes pass**.
 ## Running
 
 ```bash
-# Build first so probes can dynamic-import dist/**
+# IMPORTANT: build first so probes can dynamic-import dist/**
+# Probes read dist/**, not src/. If you switch branches without
+# rebuilding, probes will be scoring the *old* compiled code.
 npm run build
 
 # All probes
@@ -60,6 +62,13 @@ node evolution/probes/run.mjs
 
 # Single probe
 node evolution/probes/run.mjs schema-strict
+
+# Verbose JSON for diffing baseline vs candidate in your harness
+node evolution/probes/run.mjs --json > before.json
+# ... switch branch ...
+npm run build
+node evolution/probes/run.mjs --json > after.json
+diff before.json after.json
 ```
 
 Full run target: **< 2 minutes** on a single thread, no LLM calls.
