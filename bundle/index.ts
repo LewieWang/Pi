@@ -19,6 +19,7 @@ import { createEvidenceReducerExtension } from "../evidence-reducer/index.js";
 import { createOnlineContextCompactExtension } from "../online-compact/index.js";
 import { createTokenTrackerExtension } from "../token-tracker/index.js";
 import { createSavingsTrackerExtension } from "../savings-tracker/index.js";
+import { createHarnessJournalExtension } from "../harness-journal/index.js";
 
 export interface BundleOptions {
 	readonly forceAll?: boolean;
@@ -42,6 +43,10 @@ export function createSolPiBundle(options: BundleOptions = {}): ExtensionFactory
 			if (options.forceAll || config.observationPack) createObservationPackExtension()(pi);
 			if (options.forceAll || config.evidencePreservingReducer) createEvidenceReducerExtension()(pi);
 			if (options.forceAll || config.onlineContextCompact) createOnlineContextCompactExtension()(pi);
+			if (options.forceAll || config.harnessJournal?.enabled) {
+				// forceAll bypasses the internal config gate as well
+				createHarnessJournalExtension(options.forceAll ? { enabled: true } : {})(pi);
+			}
 		});
 	};
 }

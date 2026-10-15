@@ -12,6 +12,7 @@ SoL-Pi 思想的本地实现，作为 v1.2.0 扩展。不修改 pi 源码。
 | **Online Context Compact** | ✅ 已实现 + 决策链端到端验证 | 21/21 |
 | **Token Tracker** | ✅ 每轮 + session 总结 | 12/12 |
 | **Savings Tracker** | ✅ Footer live counter | 1/1 |
+| **Harness Journal** | ✅ harness 历史/轨迹/评分/技能库 | 21/21 |
 | **Bundle** | ✅ 单一入口安装 | — |
 | **Integration** | ✅ 25s 真实 pi run | 1/1 |
 
@@ -33,9 +34,25 @@ SoL-Pi 思想的本地实现，作为 v1.2.0 扩展。不修改 pi 源码。
 {
   "version": 1,
   "actionFusion": true,
-  "cacheWriteReadRatio": 1.0
+  "cacheWriteReadRatio": 1.0,
+  "harnessJournal": { "enabled": true }
 }
 ```
+
+## Harness Journal（Meta-Harness / EvoTrainer 式自进化地基）
+
+思想来源：Meta-Harness（arXiv:2603.28052）全历史文件系统访问 + EvoTrainer（arXiv:2606.03108）Memory+Skill 库；`aggregate.json` 是后续 ERA 式 PUCT 搜索（harness-puct）的数据集。
+
+开启后每次 pi 会话自动写入 `~/.pi/agent/harness-history/`：
+
+- `index.jsonl` —— 每会话一行（fingerprint + 模型 + 文件数），append-only
+- `fingerprints/<fp>.json` —— 内容寻址的 harness 快照（源码哈希 + 配置），跨会话去重，永不修剪
+- `trajectories/<sessionId>.jsonl` —— 每轮原始 usage（input 已剔除缓存，pi 语义）
+- `scores/<sessionId>.json` —— 会话总分 + decisions 计数（obs/red/fuse）
+- `aggregate.json` —— 每 fingerprint 累计
+- `skills/` —— EvoTrainer 技能库：analyzer-skills / repair-strategies / procedure-templates
+
+守则落实：显式 opt-in（`enabled:true`）；fail-open（IO 失败只记 `harness_journal_failure`）；保留证据（index/fingerprints 永不修剪，只轮转 trajectories/scores，默认留 500）；strict schema（未知 key 致命）。
 
 ## 加载
 

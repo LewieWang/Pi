@@ -12,6 +12,7 @@
 			"./online-compact/index.ts",
 			"./token-tracker/index.ts",
 			"./savings-tracker/index.ts",
+			"./harness-journal/index.ts",
 			"./vision-guard/index.ts",
 			"./footer-override/index.ts",
 			"./image-paste-fix/index.ts"
