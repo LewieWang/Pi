@@ -20,8 +20,55 @@ rg "^\| timestamp" evolution/evolution-log.md
 
 | timestamp | goal | branch | outcome |
 |---|---|---|---|
+| 2026-10-15 23:54Z | format-tokens-billions | evolve/format-tokens-billions-20261015 | merged (100/100) |
 | 2026-10-15 23:33Z | evolution-probes | (main) | merged (S2 scaffold) |
 | 2026-10-15 23:18Z | harness-journal | evolve/harness-journal-20261015 | merged (pre-S2 baseline) |
+
+---
+
+## 2026-10-15 — S2 cycle 1: formatTokens extends through B (10⁹)
+
+- **timestamp**: 2026-10-15T23:54Z
+- **branch**: `evolve/format-tokens-billions-20261015`
+- **commit**: `29d15ad`
+- **tag**: `evolved-format-tokens-billions-20261015`
+- **goal**: extend `formatTokens()` to the billions bracket so total
+  cost strings render as `1.2B` instead of rolling up to `1200M`.
+- **hypothesis**: the existing footer-arithmetic probe can absorb this
+  with only added boundary cases; no existing bracket shrinks, so
+  regression risk is zero against the old assertion set.
+- **change summary** (+26 / −5):
+  - `footer-override/index.ts`: two new `if` branches for
+    `[1e9, 1e10) ⇒ "X.YB"` and `[1e10, ∞) ⇒ "XB"` plus an extended
+    doc-comment listing the new bracket table.
+  - `evolution/probes/footer-arithmetic.mjs`: +8 boundary assertions
+    covering 999_999_999 (last M-bucket entry) through 5e10; the
+    monotonic helper now scans up to 2e10 so future bracket shrinks
+    would be caught.
+- **probe before** (clean `main` at `9010cc1`):
+  ```
+  schema-strict               ✓ 100/100     26.1 ms    (23/23)
+  extensions-load             ✓ 100/100   1769.1 ms    (14/14)
+  footer-arithmetic           ✓ 100/100      0.2 ms    (32/32)
+  harness-journal-arithmetic  ✓ 100/100      1.7 ms    (44/44)
+  aggregate: 100/100 · total: 1.80s · 113 assertions
+  ```
+- **probe after** (branch tip):
+  ```
+  schema-strict               ✓ 100/100     33.7 ms    (23/23)
+  extensions-load             ✓ 100/100   1788.0 ms    (14/14)
+  footer-arithmetic           ✓ 100/100      0.2 ms    (40/40)   +8
+  harness-journal-arithmetic  ✓ 100/100      1.7 ms    (44/44)
+  aggregate: 100/100 · total: 1.83s · 121 assertions
+  ```
+- **red line check**: no probe flipped `pass`→`fail`. Score
+  non-decreasing. Assertion coverage gained +8.
+- **npm test**: 131/131 in 19.6s (unchanged).
+- **decision**: **merge** (fast-forward into `main`).
+- **outcome**: ✅ merged; branch preserved for traceability; tag
+  `evolved-format-tokens-billions-20261015` placed on the merge point.
+- **next**: deliberate regression probe to verify the red-line auto-
+  rollback path (Phase D).
 
 ---
 
