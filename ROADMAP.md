@@ -13,7 +13,7 @@
 **RPC 协议权威文档**（做任何 RPC 相关改动前必须先读）：
 `C:\Users\lewie\.workbuddy\binaries\node\versions\22.22.2-6\node_modules\@earendil-works\pi-coding-agent\docs\rpc.md`
 **会话持久化**：`sessions/<encoded-cwd>/*.jsonl`（Pi 原生格式，可直接 `--session` 加载）。
-**验证方式**：`md_probe.js` 是现成的 Playwright 专项探针（NODE_PATH 指向 `C:\Users\lewie\.workbuddy\binaries\node\workspace\node_modules`，用 `22.22.2-6\node.exe` 跑，headless Chrome 在 `C:/Program Files/Google/Chrome/Application/chrome.exe`），新功能照它的模式加断言。
+**验证方式**：`probes/md_probe.js` 是现成的 Playwright 专项探针（NODE_PATH 指向 `C:\Users\lewie\.workbuddy\binaries\node\workspace\node_modules`，用 `22.22.2-6\node.exe` 跑，headless Chrome 在 `C:/Program Files/Google/Chrome/Application/chrome.exe`），新功能照它的模式加断言。
 
 **三条铁律（每个任务都带）**：
 1. 改 `public/` 下的前端文件：安全，浏览器强刷（Ctrl+F5）即生效。
@@ -47,7 +47,7 @@
 1. 分支规范：每个进化目标开分支 evolve/<目标短名>-<YYYYMMDD>，如 evolve/faster-skill-load-20261015。一次只进化一个目标（成本纪律）。
 2. 探针评分体系（evolution 目录下建 probes/）：
    a. 每个探针是一个 Node 脚本，输出机器可读结果：{ name, pass, score, durationMs }，score 0-100。
-   b. 现有 md_probe.js（D:\PI\pi-webui\md_probe.js，Playwright 模式）可作 WebUI 相关探针样板；extensions 自身的探针针对扩展行为写断言（扩展能否加载、命令是否注册、skill 是否可调用等，以仓库实际功能为准）。
+   b. 现有 probes/md_probe.js（D:\PI\pi-webui\probes/md_probe.js，Playwright 模式）可作 WebUI 相关探针样板；extensions 自身的探针针对扩展行为写断言（扩展能否加载、命令是否注册、skill 是否可调用等，以仓库实际功能为准）。
    c. 评分必须便宜：单次全量探针 < 2 分钟；禁调贵模型；能用断言就不用 LLM 评判。
    d. 先建 2-3 个覆盖核心功能的探针，再跑第一个进化周期。
 3. 进化循环（由你 Pi 自己驱动，不是常驻进程）：
@@ -137,7 +137,7 @@ C:\Users\lewie\.workbuddy\binaries\node\versions\22.22.2-6\node_modules\@earendi
 验收：
 1. 在 WebUI 里触发一个需要审批的操作（例如让 Pi 执行一个可能危险的命令或进入 plan mode），界面弹出审批框。
 2. 点「允许」后操作继续执行；点「拒绝」后 Pi 收到拒绝并停止对应操作。
-3. md_probe.js 同款探针（Playwright，headless Chrome）加一轮断言：模拟一次 dialog 事件 → 弹框出现 → 点击 → 响应正确回传。无 JS 错误。
+3. probes/md_probe.js 同款探针（Playwright，headless Chrome）加一轮断言：模拟一次 dialog 事件 → 弹框出现 → 点击 → 响应正确回传。无 JS 错误。
 ```
 
 ---
@@ -169,7 +169,7 @@ C:\Users\lewie\.workbuddy\binaries\node\versions\22.22.2-6\node_modules\@earendi
 1. 发一个长任务（会流式 10 秒以上），流式中输入第二条消息 → 显示排队 chip → 本轮结束后自动发出并开始第二轮。
 2. 排 3 条 → 依次自动发完。
 3. 非流式时发送行为与现在完全一致。
-4. 探针（Playwright，参考现有 md_probe.js）模拟：流式中连发 2 条 → 第二条出现排队 UI → 两轮都完成。
+4. 探针（Playwright，参考现有 probes/md_probe.js）模拟：流式中连发 2 条 → 第二条出现排队 UI → 两轮都完成。
 ```
 
 ---
@@ -302,7 +302,7 @@ C:\Users\lewie\.workbuddy\binaries\node\versions\22.22.2-6\node_modules\@earendi
 
 > **状态：已完成（v0.9，2026-10-16）**。三次小步提交，每步可回退：
 > `f29da0e` server 进程池 → `ac38b91` 前端多会话视图 → `9db6cc7` 会话文件轮换修复。
-> 新增 `parallel_probe.js`（26/26）；全量回归 edit 20/20、steer 15/15、ui 26/26、
+> 新增 `probes/parallel_probe.js`（26/26）；全量回归 edit 20/20、steer 15/15、ui 26/26、
 > trace 25/25、gitfiles 36/36、md 7/7。还原点 `6dc9804`。
 > 上线需用户在无任务时段重启 server（重启会杀当前任务进程）。
 
@@ -318,7 +318,7 @@ C:\Users\lewie\.workbuddy\binaries\node\versions\22.22.2-6\node_modules\@earendi
 2. WebSocket 协议加 sessionId 路由：客户端消息带目标 session，服务端按 session 分发到对应子进程；子进程输出只推给订阅了该 session 的客户端。
 3. 生命周期：新会话/切会话/删会话/服务关闭时正确 spawn/kill，不能泄漏子进程（写个自测：开关 20 个会话后 ps 一下 pi 进程数）。
 4. 前端：侧栏会话项显示「运行中」动效；切到后台会话能看到它的实时流式输出继续滚动；未读会话加角标。
-5. 兼容：单会话时的全部现有行为不能回归（探针 md_probe.js 全绿）。
+5. 兼容：单会话时的全部现有行为不能回归（探针 probes/md_probe.js 全绿）。
 
 约束：
 - 这是 server.js 大改：先 git commit 当前状态留还原点（在 D:\PI\pi-webui 里 git init 一个本地仓库或确认已有），再动手。
@@ -329,7 +329,7 @@ C:\Users\lewie\.workbuddy\binaries\node\versions\22.22.2-6\node_modules\@earendi
 1. 同时开 A/B 两个会话各发一个长任务 → 两边都正常流式 → 互不串消息。
 2. 切到 A 时 B 的输出不丢（后台继续累积）。
 3. 关掉 B → B 的 pi 子进程退出，A 不受影响。
-4. md_probe.js 既有断言全绿 + 新增并行断言。
+4. probes/md_probe.js 既有断言全绿 + 新增并行断言。
 ```
 
 ---
@@ -405,13 +405,13 @@ C:\Users\lewie\.workbuddy\binaries\node\versions\22.22.2-6\node_modules\@earendi
 约束：
 - 只改 public/ 下文件，浏览器强刷即生效，不碰 server.js。
 - 保持零依赖（全用浏览器原生 API：Notification / SpeechSynthesis / Intl）。
-- i18n 抽取不许改坏任何现有功能——抽完跑 md_probe.js 回归。
+- i18n 抽取不许改坏任何现有功能——抽完跑 probes/md_probe.js 回归。
 
 验收：
 1. 切到别的标签页等一轮完成 → 桌面通知弹出。
 2. 点朗读 → 出声；再点 → 停。
 3. 切 English → 界面全部变英文；刷新后保持；切回中文恢复。
-4. md_probe.js 既有断言全绿。
+4. probes/md_probe.js 既有断言全绿。
 ```
 
 ---

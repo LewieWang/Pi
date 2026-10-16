@@ -265,5 +265,5 @@ Pi 的 RPC 协议文档在：
 回滚到 v0.2（v0.2 快照保留在 `rollback/` 目录）：`cp rollback/server.js.v0.2.bak server.js && cp rollback/app.js.v0.2.bak public/app.js && cp rollback/style.css.v0.2.bak public/style.css && cp rollback/index.html.v0.2.bak public/index.html`
 注：v0.3 是今天上午的输入增强版本，v0.4 是下午的补全 + 灯箱版本，两个增量分别 313 / 240 行 app.js。当前 .bak 是 v0.2，跳过中间版本；如需回滚到 v0.3/v0.4，需另存中间快照。
 v0.5 为纯前端改动（markdown.js 新增 + app.js/index.html/style.css 修改），server.js 零改动，浏览器强刷（Ctrl+F5）即生效。
-v0.6 改 server.js（listSessionFiles 加空会话检测）+ 前端；前端刷新即生效大部分，空会话精确检测需重启 server。探针：md_probe.js（v0.5）+ session_probe.js（v0.6，16 项断言）。
-v0.7 在 v0.6 基础上从源头重做（API 过滤 + 启动清扫 + 懒创建，拆除降噪 UI）；前端刷新即生效大部分，API 过滤/启动清扫需重启 server。探针 session_probe.js 升级为 22 项断言（含懒创建端到端：点新建不落盘、首条消息 flush、新会话进列表——端到端用例跑一次真实模型调用，约 1-2 分钟）。临时实例测法：`node server.js --session-dir <临时目录> --port 3211` 起第二实例（拷一个大会话文件进去供历史渲染），`PROBE_BASE=http://localhost:3211 node session_probe.js`，避免重启正在用的 3210。
+v0.6 改 server.js（listSessionFiles 加空会话检测）+ 前端；前端刷新即生效大部分，空会话精确检测需重启 server。探针：probes/md_probe.js（v0.5）+ probes/session_probe.js（v0.6，16 项断言）。
+v0.7 在 v0.6 基础上从源头重做（API 过滤 + 启动清扫 + 懒创建，拆除降噪 UI）；前端刷新即生效大部分，API 过滤/启动清扫需重启 server。探针 probes/session_probe.js 升级为 22 项断言（含懒创建端到端：点新建不落盘、首条消息 flush、新会话进列表——端到端用例跑一次真实模型调用，约 1-2 分钟）。临时实例测法：`node server.js --session-dir <临时目录> --port 3211` 起第二实例（拷一个大会话文件进去供历史渲染），`PROBE_BASE=http://localhost:3211 node probes/session_probe.js`，避免重启正在用的 3210。
