@@ -3,3 +3,4 @@ sessions/
 .pi-uploads/
 *.log
 server.js.bak
+*.bak

@@ -144,15 +144,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.goto(BASE + "/", { waitUntil: "networkidle" });
 
   for (let round = 1; round <= 3; round++) {
-    await page.fill("#input", `不要调用任何工具，直接只回复四个字：锚点${["一","二","三"][round - 1]}号`);
+    const tag = ["一", "二", "三"][round - 1];
+    await page.fill("#input", `不要调用任何工具，直接只回复四个字：锚点${tag}号`);
     await page.click("#btn-send");
+    let done = false;
     for (let i = 0; i < 120; i++) {
       await sleep(1000);
       const btn = await page.$eval("#btn-send", (el) => el.textContent);
-      if (btn === "发送") break;
+      const has = await page.evaluate((t) => document.body.textContent.includes(`锚点${t}号`), tag);
+      if (btn === "发送" && has) { done = true; break; }
     }
+    check(`第 ${round} 轮真实完成（回复上屏 + 空闲）`, done, done ? "settled" : "timeout");
   }
-  check("3 轮对话完成", true, "settled");
   await sleep(1500); // 锚点异步落盘
 
   const refsOut = execSync("git for-each-ref refs/piweb/rounds/ --format=%(refname)", { cwd: GIT_CWD }).toString().trim().split("\n").filter(Boolean);

@@ -54,9 +54,12 @@ function findPiCmd() {
 }
 const PI_CMD = findPiCmd();
 
-// ---------- Pi RPC 子进程管理 ----------
-let piProc = null;
-let rpcClients = new Set(); // 所有连接的浏览器
+// ---------- Pi RPC 子进程管理（v0.9 会话进程池） ----------
+// 每个会话一个独立的 pi --mode rpc 子进程；key 为会话文件路径（临时会话为
+// "new:<ts>"）。fileIndex 反查保证同一 jsonl 永远只有一个进程（防双写损坏）。
+const POOL = new Map();       // key -> entry {key, tag, proc, sessionFile, lastUsed, timer}
+const FILE_INDEX = new Map(); // sessionFile -> entry
+let rpcClients = new Set();   // 所有连接的浏览器
 // ---------- Extension UI 仲裁（rpc-extension-ui 子协议） ----------
 // 多浏览器客户端同时连接时，同一对话框会在每端渲染；pi 侧以首个到达的
 // 响应为准。这里用 pending 集合去重：首个响应转发给 pi 并广播
@@ -70,27 +73,61 @@ const pending = new Map(); // id -> {resolve}
 // 给浏览器广播的编号（用于 UI 关联）
 let uiSeq = 0;
 
-function startPi() {
-  if (piProc) return;
-  log(`启动 Pi RPC 子进程 (cwd: ${WORK_DIR}, sessionDir: ${EPHEMERAL ? "<ephemeral>" : SESSION_DIR})`);
+/** 进程池：取（必要时 spawn）指定会话的 pi 进程。key=null/"" → "default" */
+function getEntry(key) {
+  key = normalizeKey(key);
+  // 已知会话文件 → 复用已打开该文件的进程（避免同一 jsonl 双进程）
+  if (FILE_INDEX.has(key)) {
+    const e = FILE_INDEX.get(key);
+    touchEntry(e);
+    return e;
+  }
+  if (POOL.has(key)) {
+    touchEntry(POOL.get(key));
+    return POOL.get(key);
+  }
+  return spawnEntry(key);
+}
+
+function normalizeKey(key) {
+  if (key === undefined || key === null || key === "") return "default";
+  return String(key);
+}
+
+/** 该 key 是否对应真实会话文件（非 default / 非临时 key） */
+function keyIsSessionFile(key) {
+  return key !== "default" && !key.startsWith("new:");
+}
+
+function spawnEntry(key) {
   const piArgs = ["--mode", "rpc", "--model", PI_MODEL];
+  let sessionFile = null;
   if (EPHEMERAL) {
-    piArgs.push("--no-session"); // 兼容老行为
+    piArgs.push("--no-session");
   } else {
     piArgs.push("--session-dir", SESSION_DIR);
-    if (INITIAL_NAME) piArgs.push("--name", INITIAL_NAME);
+    if (keyIsSessionFile(key)) {
+      sessionFile = key;
+      piArgs.push("--session", key); // 加载已有会话文件
+    } else if (INITIAL_NAME) {
+      piArgs.push("--name", INITIAL_NAME);
+    }
   }
-  piProc = spawn(PI_CMD, piArgs, {
+  log(`启动 Pi RPC 子进程 [${key}] (cwd: ${WORK_DIR}${sessionFile ? ", session: " + sessionFile.split(/[\\/]/).pop() : ""})`);
+  const proc = spawn(PI_CMD, piArgs, {
     cwd: WORK_DIR,
     shell: process.platform === "win32",
     env: { ...process.env },
   });
+  const entry = { key, tag: key, proc, sessionFile, lastUsed: Date.now(), timer: null };
+  POOL.set(key, entry);
+  if (sessionFile) FILE_INDEX.set(sessionFile, entry);
 
   // 关键：按 LF 切分 JSONL，不能用 readline（会错误切分 U+2028/U+2029）
   // 这里直接用 buffer indexOf，更可靠
   let buf = "";
-  piProc.stdout.setEncoding("utf8");
-  piProc.stdout.on("data", (chunk) => {
+  proc.stdout.setEncoding("utf8");
+  proc.stdout.on("data", (chunk) => {
     buf += chunk;
     let idx;
     while ((idx = buf.indexOf("\n")) >= 0) {
@@ -104,45 +141,89 @@ function startPi() {
         log(`JSON 解析失败: ${e.message}`);
         continue;
       }
-      handlePiRecord(record);
+      touchEntry(entry);
+      handlePiRecord(record, entry);
     }
   });
 
-  piProc.stderr.setEncoding("utf8");
-  piProc.stderr.on("data", (d) => {
+  proc.stderr.setEncoding("utf8");
+  proc.stderr.on("data", (d) => {
     // stderr 只是诊断信息，不是协议数据
-    process.stderr.write(`[pi stderr] ${d}`);
+    process.stderr.write(`[pi:${entry.tag}] ${d}`);
   });
 
-  piProc.on("exit", (code) => {
-    log(`Pi 进程退出 (code: ${code})`);
-    piProc = null;
+  proc.on("exit", (code) => {
+    log(`Pi 进程退出 [${entry.tag}] (code: ${code})`);
+    if (POOL.get(entry.key) === entry) POOL.delete(entry.key);
+    if (entry.sessionFile && FILE_INDEX.get(entry.sessionFile) === entry) FILE_INDEX.delete(entry.sessionFile);
     // 清空待应答对话框并通知所有端关框（旧进程的 id 已无意义）
     for (const rid of pendingUiIds) {
-      broadcast({ type: "ui_dialog_resolved", id: rid });
+      broadcastSession(entry, { type: "ui_dialog_resolved", id: rid });
     }
     pendingUiIds.clear();
-    broadcast({ type: "pi_exited", code });
+    broadcastSession(entry, { type: "pi_exited", code });
+    broadcastPoolState();
   });
+  broadcastPoolState();
+  return entry;
 }
 
-function stopPi() {
-  if (piProc) {
-    try { piProc.stdin.end(); } catch (e) {}
-    piProc = null;
+const POOL_IDLE_MS = Math.max(0, Number(getArg("--pool-idle-timeout", "1800"))) * 1000;
+
+/** 活动刷新（重置空闲回收定时器） */
+function touchEntry(entry) {
+  entry.lastUsed = Date.now();
+  if (entry.timer) { clearTimeout(entry.timer); entry.timer = null; }
+  if (POOL_IDLE_MS > 0) {
+    entry.timer = setTimeout(() => killEntry(entry.key, "idle-timeout"), POOL_IDLE_MS);
+    if (entry.timer.unref) entry.timer.unref();
   }
 }
 
-function sendToPi(command) {
-  if (!piProc) startPi();
-  // 给没有 id 的命令自动编号，方便关联响应
-  if (!command.id) command.id = `ui-${++uiSeq}`;
-  pending.set(command.id, { resolve: () => {} });
-  piProc.stdin.write(JSON.stringify(command) + "\n");
-  return command.id;
+/** 杀掉指定会话的进程（关闭会话 / 删除会话 / 空闲回收 / 服务关闭） */
+function killEntry(key, reason) {
+  key = normalizeKey(key);
+  const entry = FILE_INDEX.has(key) ? FILE_INDEX.get(key) : POOL.get(key);
+  if (!entry) return false;
+  if (entry.timer) { clearTimeout(entry.timer); entry.timer = null; }
+  POOL.delete(entry.key);
+  if (entry.sessionFile && FILE_INDEX.get(entry.sessionFile) === entry) FILE_INDEX.delete(entry.sessionFile);
+  try { entry.proc.stdin.end(); } catch (e) {}
+  try { entry.proc.kill(); } catch (e) {}
+  log(`已关闭 Pi 进程 [${entry.tag}] (${reason || "manual"})`);
+  broadcastPoolState();
+  return true;
 }
 
-function handlePiRecord(record) {
+function killAllEntries(reason) {
+  for (const key of [...POOL.keys()]) killEntry(key, reason);
+}
+
+function poolState() {
+  const items = [];
+  for (const e of POOL.values()) {
+    items.push({ session: e.tag, sessionFile: e.sessionFile, busy: isEntryBusy(e), lastUsed: e.lastUsed });
+  }
+  return { sessions: items, idleTimeoutSec: POOL_IDLE_MS / 1000 };
+}
+
+function broadcastPoolState() {
+  broadcast({ type: "pool_state", ...poolState() });
+}
+
+/** 该会话是否有进行中的回合（用于侧栏「运行中」动效） */
+function isEntryBusy(e) {
+  return e.busyUntil && Date.now() < e.busyUntil;
+}
+
+function stopAllPi() {
+  killAllEntries("shutdown");
+}
+
+
+function handlePiRecord(record, entry) {
+  const owner = entry || null;
+  const tag = owner ? owner.tag : "default";
   // 原始 usage 证据日志：每条带 usage 的 assistant 消息追加到 sessions/usage.jsonl，
   // 可对照供应商控制台审计（fail-open：日志失败不影响转发）。
   try {
@@ -155,38 +236,71 @@ function handlePiRecord(record) {
         && UI_DIALOG_METHODS.has(record.method) && record.id !== undefined && record.id !== null) {
       pendingUiIds.add(String(record.id));
     }
-    // v0.8: 缓存当前会话文件（get_state 响应携带），供 git 锚点分目录；
-    // 会话变更时重置锚点状态（sid/轮号重新扫描）
+    // v0.8: 缓存会话文件（get_state 响应携带）——临时会话拿到文件后重映射 fileIndex
     if (record && record.type === "response" && record.command === "get_state"
         && record.success && record.data && record.data.sessionFile) {
       const sf = String(record.data.sessionFile);
-      if (sf !== currentPiSessionFile) {
-        currentPiSessionFile = sf;
-        anchorSid = null;
-        anchorNext = 0;
+      if (owner) {
+        owner.sessionFile = sf;
+        owner.tag = sf; // 记录携带真实路径后对外用路径标识
+        if (!FILE_INDEX.has(sf)) FILE_INDEX.set(sf, owner);
       }
     }
     // v0.8: 每轮结束（assistant 回复+其工具调用完成）→ git 锚点（静默、异步）
     if (record && record.type === "turn_end") {
-      scheduleGitAnchor();
+      scheduleGitAnchor(owner);
+    }
+    // v0.9: 运行中状态（agent_start/turn_start → busy；agent_settled → 空闲）
+    if (owner) {
+      if (record && (record.type === "agent_start" || record.type === "turn_start")) {
+        owner.busyUntil = Date.now() + 120000;
+      } else if (record && record.type === "agent_settled") {
+        owner.busyUntil = 0;
+      }
     }
   } catch (e) {
     // 忽略日志错误（fail-open）
   }
   // 1) 命令响应 → 原样转发（浏览器按 id 关联）
-  // 2) 会话事件 → 转发给所有浏览器
-  broadcast({ type: "pi_record", record });
+  // 2) 会话事件 → 转发给订阅了该会话的浏览器
+  broadcastSession(owner, { type: "pi_record", record, session: tag });
+  if (owner && record && (record.type === "agent_start" || record.type === "agent_settled")) {
+    broadcastPoolState();
+  }
 }
+
+/** 发送到指定会话的 pi 进程（无 id 的命令自动编号） */
+function sendToPi(command, sessionKey) {
+  const entry = getEntry(sessionKey);
+  if (!command.id) command.id = `ui-${++uiSeq}`;
+  pending.set(command.id, { resolve: () => {} });
+  try {
+    entry.proc.stdin.write(JSON.stringify(command) + "\n");
+  } catch (e) {
+    log(`写入 pi stdin 失败 [${entry.tag}]: ${e.message}`);
+  }
+  return command.id;
+}
+
 
 // ---------- v0.8: P1-⑤ 每轮 git 锚点（绝对只读不改用户 git 状态） ----------
 // 原理：git stash create 只生成 commit 对象（不动工作区/index/HEAD/不进 stash list），
 //       git commit-tree 从其 tree 建快照 commit，git update-ref 挂到
 //       refs/piweb/rounds/<session>/<round-n>。无变更时快照=HEAD（直接挂 HEAD）。
 const execFile = require("child_process").execFile;
-let currentPiSessionFile = null;   // pi 当前会话文件（get_state 响应缓存）
-let anchorSid = null;              // 锚点用会话标识（稳定后不再变）
-let anchorNext = 0;                // 下一个轮号（首次锚点时从现有 ref 扫出）
-let anchorChain = Promise.resolve(); // 串行化（turn_end 密集触发防重入）
+// v0.9: 锚点状态按会话进程分开（WeakMap entry -> {sid, next, chain}）
+const anchorState = new WeakMap(); // entry -> {sid, next, chain}
+let anchorFallback = null;         // 无 entry 时的兑底标识
+
+function anchorStateOf(entry) {
+  if (!entry) {
+    if (!anchorFallback) anchorFallback = { sid: null, next: 0, chain: null };
+    return anchorFallback;
+  }
+  let st = anchorState.get(entry);
+  if (!st) { st = { sid: null, next: 0, chain: null }; anchorState.set(entry, st); }
+  return st;
+}
 
 function gitExec(args, timeoutMs) {
   return new Promise((resolve) => {
@@ -195,31 +309,31 @@ function gitExec(args, timeoutMs) {
   });
 }
 
-function getAnchorSid() {
-  if (anchorSid) return anchorSid;
-  if (currentPiSessionFile) {
-    anchorSid = path.basename(currentPiSessionFile).replace(/\.jsonl$/i, "");
-  } else {
-    anchorSid = "proc-" + process.pid; // 尚未收到 get_state（临时会话等）
-  }
-  return anchorSid;
+function getAnchorSid(entry) {
+  const st = anchorStateOf(entry);
+  if (st.sid) return st.sid;
+  const sf = (entry && (entry.sessionFile || entry.tag)) || null;
+  st.sid = sf ? path.basename(sf).replace(/\.jsonl$/i, "") : "proc-" + process.pid;
+  return st.sid;
 }
 
-function scheduleGitAnchor() {
-  anchorChain = anchorChain.then(() => doGitAnchor()).catch(() => {});
+function scheduleGitAnchor(entry) {
+  const st = anchorStateOf(entry);
+  st.chain = (st.chain || Promise.resolve()).then(() => doGitAnchor(entry)).catch(() => {});
 }
 
-async function doGitAnchor() {
+async function doGitAnchor(entry) {
+  const st = anchorStateOf(entry);
   try {
     const inside = await gitExec(["rev-parse", "--is-inside-work-tree"]);
     if (inside.err || inside.stdout.trim() !== "true") return; // 非 git 仓库：静默跳过
-    const sid = getAnchorSid();
+    const sid = getAnchorSid(entry);
     // 首次锚点：扫现有最大轮号（重启后继续递增）
-    if (anchorNext === 0) {
+    if (st.next === 0) {
       const refs = await gitExec(["for-each-ref", `refs/piweb/rounds/${sid}/`, "--format=%(refname)"]);
       let maxN = 0;
       for (const m of refs.stdout.matchAll(/\/(\d+)$/g)) maxN = Math.max(maxN, parseInt(m[1], 10));
-      anchorNext = maxN;
+      st.next = maxN;
     }
     // 快照对象：stash create（无副作用；无变更时返回空）
     const stash = await gitExec(["stash", "create"]);
@@ -235,12 +349,12 @@ async function doGitAnchor() {
       if (head.err || !head.stdout.trim()) return;
       commitSrc = head.stdout.trim();
     }
-    const n = ++anchorNext;
+    const n = ++st.next;
     const msg = `piweb round ${n} ${sid}`;
     const ct = await gitExec(["commit-tree", commitSrc, "-m", msg]);
     if (ct.err || !ct.stdout.trim()) return;
     const ur = await gitExec(["update-ref", `refs/piweb/rounds/${sid}/${n}`, ct.stdout.trim()]);
-    if (ur.err) { anchorNext = n - 1; return; }
+    if (ur.err) { st.next = n - 1; return; }
     log(`git 锚点: refs/piweb/rounds/${sid}/${n} -> ${ct.stdout.trim().slice(0, 10)}`);
   } catch (e) {
     // git 不存在/任何失败：静默跳过（P1-⑤ 约束）
@@ -612,7 +726,12 @@ const server = http.createServer(async (req, res) => {
         const urlObj = new URL(req.url, "http://localhost");
         let sid = urlObj.searchParams.get("session");
         if (sid && !/^[A-Za-z0-9._-]+$/.test(sid)) throw new Error("非法会话标识");
-        if (!sid) sid = getAnchorSid();
+        // v0.9: 未指定时优先用最近活跃的会话标识（进程池）
+        if (!sid) {
+          let last = null;
+          for (const e of POOL.values()) if (!last || e.lastUsed > last.lastUsed) last = e;
+          sid = last ? getAnchorSid(last) : getAnchorSid(null);
+        }
         const inside = await gitExec(["rev-parse", "--is-inside-work-tree"]);
         if (inside.err || inside.stdout.trim() !== "true") {
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -759,6 +878,8 @@ const server = http.createServer(async (req, res) => {
     if (pathname === "/api/sessions/delete" && req.method === "POST") {
       const body = await readJson(req).catch(() => ({}));
       try {
+        // v0.9: 删除前先杀掉占用该 jsonl 的进程（否则进程会继续写已删文件）
+        killEntry(body.path || "", "session-deleted");
         const ok = deleteSession(body.path || "");
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok }));
@@ -811,38 +932,80 @@ function broadcast(obj) {
   }
 }
 
+/** 只发给订阅了该会话的客户端（owner 为空 → 广播，保持旧行为）
+ *  订阅判定用「进程身份 + key + tag」三重匹配：get_state 后 tag 会变成真实
+ *  路径，但客户端订阅时拿到的可能是 "default" 或 new:<ts>，任一命中即可。 */
+function broadcastSession(owner, obj) {
+  if (!owner) { broadcast(obj); return; }
+  const msg = JSON.stringify(obj);
+  for (const ws of rpcClients) {
+    if (ws.readyState !== 1) continue;
+    if (!ws.sessions) continue;
+    if (!(ws.sessions.has(owner.tag) || ws.sessions.has(owner.key) || ws.sessions.has(owner))) continue;
+    ws.send(msg);
+  }
+}
+
 function log(msg) {
   console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
 }
 
 wss.on("connection", (ws) => {
   rpcClients.add(ws);
+  ws.sessions = new Set();   // 该客户端订阅/使用过的会话（订阅后才能收到其记录）
+  ws.current = null;         // 最近一次操作的会话（默认会话 = "default"）
   log(`浏览器已连接 (当前 ${rpcClients.size} 个)`);
 
-  // 告诉浏览器 Pi 的工作目录 + sessionDir
-  ws.send(JSON.stringify({ type: "hello", cwd: WORK_DIR, sessionDir: SESSION_DIR, ephemeral: EPHEMERAL }));
+  // 告诉浏览器 Pi 的工作目录 + sessionDir + 进程池状态
+  ws.send(JSON.stringify({ type: "hello", cwd: WORK_DIR, sessionDir: SESSION_DIR, ephemeral: EPHEMERAL, ...poolState() }));
 
   ws.on("message", (data) => {
     let msg;
     try { msg = JSON.parse(data.toString()); } catch (e) { return; }
 
     switch (msg.type) {
-      // 浏览器 → Pi 的 RPC 命令（prompt/abort/set_model/get_state/new_session/switch_session/set_session_name 等）
+      // 浏览器 → Pi 的 RPC 命令（prompt/abort/set_model/get_state/get_messages 等）
+      // v0.9: msg.session 指定目标会话（会话文件路径或 new:<ts>）；缺省沿用
+      // 本连接上次会话，首次为 "default"（完全兼容旧行为）。
       case "rpc": {
-        startPi(); // 惰性启动
+        const key = normalizeKey(msg.session || ws.current);
+        ws.current = key;
+        // 订阅该 key 对应的实际进程（对象身份）——即使后续 tag 变化也能继续收
+        ws.sessions.add(key);
+        try { ws.sessions.add(getEntry(key)); } catch (e) {}
         // extension_ui_response 去重仲裁：首个响应生效并广播关框；
         // 重复/未知 id 被抑制（不透传给 pi），防止多端重复应答污染配对。
         if (msg.command && msg.command.type === "extension_ui_response") {
           const rid = String(msg.command.id ?? "");
           const first = pendingUiIds.has(rid);
           pendingUiIds.delete(rid);
-          if (first) sendToPi(msg.command);
+          if (first) sendToPi(msg.command, key);
           broadcast({ type: "ui_dialog_resolved", id: msg.command.id });
           break;
         }
-        const id = sendToPi(msg.command);
+        const id = sendToPi(msg.command, key);
         break;
       }
+      // v0.9: 关闭会话（杀该会话的 pi 子进程，其它会话不受影响）
+      case "close_session": {
+        const key = normalizeKey(msg.session);
+        const killed = killEntry(key, "client-close");
+        ws.sessions.delete(key);
+        if (ws.current === key) ws.current = null;
+        ws.send(JSON.stringify({ type: "session_closed", session: key, killed }));
+        break;
+      }
+      // v0.9: 订阅某会话（切到后台会话时保持接收其后续记录）
+      case "subscribe_session": {
+        const key = normalizeKey(msg.session);
+        ws.sessions.add(key);
+        try { ws.sessions.add(getEntry(key)); } catch (e) {}
+        break;
+      }
+      // v0.9: 查询进程池状态
+      case "pool_query":
+        ws.send(JSON.stringify({ type: "pool_state", ...poolState() }));
+        break;
       case "refresh_sessions":
         // 浏览器请求服务端重读 sessions 目录并广播
         broadcast({ type: "sessions_changed", sessions: listSessionFiles() });
@@ -880,6 +1043,6 @@ server.listen(PORT, () => {
 
 process.on("SIGINT", () => {
   log("正在关闭...");
-  stopPi();
+  stopAllPi();
   process.exit(0);
 });
