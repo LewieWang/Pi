@@ -52,7 +52,115 @@ let lightboxImages = []; // [{src, name}]
 let lightboxIdx = -1;
 
 const $ = (id) => document.getElementById(id);
-const messagesEl = $("messages");
+const MESSAGES_ROOT = $("messages");
+// v0.9 多会话视图：每个会话一个 DOM 容器 + 一份渲染状态；
+// messagesEl 始终指向「当前活跃会话」的容器（切换 = 换容器 + 换状态）。
+let messagesEl = MESSAGES_ROOT;
+let activeSessionKey = "default";         // 当前活跃会话：会话文件路径 / new:<ts> / "default"
+const sessionViews = new Map();           // key -> {el, st, unread}
+const poolBusy = new Map();               // 会话 tag -> busy（来自 pool_state）
+
+// 视图需要保存/恢复的全局状态（切会话时切换）
+function defaultViewState() {
+  return {
+    streamingEl: null,
+    streamingBlocks: [],
+    sessionUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+    lastUsage: null,
+    lastContextTokens: 0,
+    sessionStartedAt: Date.now(),
+    roundHadAssistant: false,
+    historyLoadedOnce: false,
+    currentSessionPath: null,
+    currentSessionInfo: null,
+    isStreaming: false,
+  };
+}
+
+function ensureView(key) {
+  let v = sessionViews.get(key);
+  if (!v) {
+    const el = document.createElement("div");
+    el.className = "session-view";
+    v = { el, st: null, unread: 0, scrollTop: 0 };
+    sessionViews.set(key, v);
+  }
+  return v;
+}
+
+/** 把当前全局状态存回活跃会话的视图 */
+function saveViewState() {
+  const v = sessionViews.get(activeSessionKey);
+  if (!v) return;
+  v.st = {
+    streamingEl, streamingBlocks, sessionUsage, lastUsage, lastContextTokens,
+    sessionStartedAt, roundHadAssistant, historyLoadedOnce, currentSessionPath,
+    currentSessionInfo, isStreaming,
+  };
+  v.scrollTop = MESSAGES_ROOT.scrollTop;
+}
+
+/** 把目标会话的视图装载为当前活跃视图（DOM 容器 swap + 全局状态 swap） */
+function loadViewState(key) {
+  const v = ensureView(key);
+  if (v.el.parentNode !== MESSAGES_ROOT) MESSAGES_ROOT.appendChild(v.el); // append 即移动 = 换容器
+  const st = v.st || defaultViewState();
+  streamingEl = st.streamingEl;
+  streamingBlocks = st.streamingBlocks;
+  sessionUsage = st.sessionUsage;
+  lastUsage = st.lastUsage;
+  lastContextTokens = st.lastContextTokens;
+  sessionStartedAt = st.sessionStartedAt;
+  roundHadAssistant = st.roundHadAssistant;
+  historyLoadedOnce = st.historyLoadedOnce;
+  currentSessionPath = st.currentSessionPath;
+  currentSessionInfo = st.currentSessionInfo;
+  isStreaming = st.isStreaming;
+  messagesEl = v.el;
+  MESSAGES_ROOT.scrollTop = v.scrollTop || 0;
+}
+
+/** 切换活跃会话（保存当前 → 装载目标） */
+function switchActiveSession(key) {
+  if (key === activeSessionKey) return;
+  saveViewState();
+  activeSessionKey = key;
+  loadViewState(key);
+  const v = sessionViews.get(key);
+  if (v) v.unread = 0;
+  setSendState();
+  updateStatusBar();
+  renderSessionList();
+}
+
+/**
+ * 按会话分发记录：非活跃会话 → 临时切到它的视图渲染（后台累积），
+ * 再切回活跃会话并重置共享 UI（发送按钮/状态栏）。
+ */
+function handleRecordForSession(key, record) {
+  if (!key || key === activeSessionKey) { handleRecord(record); return; }
+  const prevKey = activeSessionKey;
+  saveViewState();
+  loadViewState(key);
+  try {
+    handleRecord(record);
+  } finally {
+    saveViewState();
+    loadViewState(prevKey);
+    setSendState();
+    updateStatusBar();
+  }
+}
+
+/** 临时会话拿到真实文件后重映射视图 key（避免同一会话两个 key） */
+function rekeySessionView(oldKey, newKey) {
+  if (!oldKey || !newKey || oldKey === newKey) return;
+  if (!sessionViews.has(oldKey)) return;
+  const v = sessionViews.get(oldKey);
+  sessionViews.delete(oldKey);
+  sessionViews.set(newKey, v);
+  if (activeSessionKey === oldKey) activeSessionKey = newKey;
+}
 
 // ---------- 日期分组辅助 ----------
 const DAY_MS = 86400000;
@@ -162,10 +270,28 @@ ws.onmessage = (ev) => {
     $("cwd").textContent = msg.cwd;
     ephemeralMode = !!msg.ephemeral;
     updateSessionListNotice();
+    applyPoolState(msg);
   } else if (msg.type === "pi_record") {
-    handleRecord(msg.record);
+    // v0.9: 按会话分发 —— 非活跃会话的记录渲染到它自己的容器（后台累积），
+    // 切回时直接看到后台继续跑出来的内容，不丢。
+    const target = msg.session || activeSessionKey;
+    handleRecordForSession(target, msg.record);
+    // 后台完成一轮 → 未读角标 +1
+    if (target !== activeSessionKey && msg.record && msg.record.type === "agent_settled") {
+      const v = ensureView(target);
+      v.unread = (v.unread || 0) + 1;
+      renderSessionList();
+    }
   } else if (msg.type === "pi_exited") {
-    addSystemNote(`Pi 进程已退出 (code ${msg.code})，下次发消息会自动重启`);
+    // v0.9: 只提示「非当前会话」的进程退出（当前会话已有重启文案）
+    if (!msg.session || msg.session === activeSessionKey) {
+      addSystemNote(`Pi 进程已退出 (code ${msg.code})，下次发消息会自动重启`);
+    }
+  } else if (msg.type === "pool_state") {
+    applyPoolState(msg);
+  } else if (msg.type === "session_closed") {
+    // 本端请求关闭会话的确认（后端已杀进程）
+    handleSessionClosed(msg.session, msg.killed);
   } else if (msg.type === "ui_dialog_resolved") {
     // v0.6.1: 多端仲裁 —— 某端已应答该对话框，本端自动关框（不重复回响应）
     extDialogResolvedRemotely(msg.id);
@@ -177,7 +303,45 @@ ws.onmessage = (ev) => {
 
 function rpc(command) {
   if (ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: "rpc", command }));
+  // v0.9: 带会话 key —— server 端路由到该会话的 pi 子进程
+  ws.send(JSON.stringify({ type: "rpc", command, session: activeSessionKey }));
+}
+
+/** 进程池状态 → 侧栏「运行中」动效 */
+function applyPoolState(msg) {
+  if (!msg || !Array.isArray(msg.sessions)) return;
+  poolBusy.clear();
+  for (const s of msg.sessions) poolBusy.set(s.session, !!s.busy);
+  renderSessionList();
+}
+
+/** 会话是否在跑（有 busy 标记） */
+function isSessionBusy(key) {
+  if (!key) return false;
+  if (poolBusy.has(key)) return poolBusy.get(key);
+  for (const [k, v] of poolBusy) {
+    if (v && (k === key || k.split(/[\\/]/).pop() === key.split(/[\\/]/).pop())) return true;
+  }
+  return false;
+}
+
+/** 关闭会话（杀后台进程） */
+function closeSessionProcess(key) {
+  if (!key) return;
+  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "close_session", session: key }));
+}
+
+function handleSessionClosed(key, killed) {
+  if (!key) return;
+  const v = sessionViews.get(key);
+  if (v) v.unread = 0;
+  if (key === activeSessionKey) {
+    addSystemNote(killed ? "已关闭当前会话的 Pi 进程（下次发消息会自动拉起）" : "该会话无运行中的进程");
+    poolBusy.delete(key);
+  } else {
+    addSystemNote(`已关闭后台会话进程 (${key.split(/[\\/]/).pop()})`);
+  }
+  renderSessionList();
 }
 
 function refreshSessionsFromServer() {
@@ -272,7 +436,14 @@ function handleResponse(rec) {
       }
       updateStats(d.messageCount);
       updateStatusBar();
-      currentSessionPath = d.sessionFile || null;
+      // v0.9: 临时 key（new:<ts>）/ 默认 key 拿到真实会话文件 → 重映射，
+      // 避免同一会话两个 key（内容分裂）
+      const sf = d.sessionFile || null;
+      if (sf && sf !== activeSessionKey
+          && (activeSessionKey === "default" || activeSessionKey.startsWith("new:"))) {
+        rekeySessionView(activeSessionKey, sf);
+      }
+      currentSessionPath = sf;
       if (pendingNewSession) {
         // v0.7: 懒创建态——get_state 返回的还是旧会话信息，不覆盖 pending 状态
         currentSessionPath = null;
@@ -1069,14 +1240,19 @@ function renderSessionList() {
       const metaText = started
         ? `开始于 ${started} · ${fmtRelative(s.modified)}${turnText} · ${sizeText}`
         : `${fmtRelative(s.modified)}${turnText} · ${sizeText}`;
-      const active = s.path === currentSessionPath ? "active" : "";
+      const active = s.path === activeSessionKey ? "active" : "";
+      // v0.9: 运行中动效 + 后台未读角标
+      const running = isSessionBusy(s.path) ? " running" : "";
+      const v = sessionViews.get(s.path);
+      const unread = (v && v.unread) ? `<span class="s-unread">${v.unread > 99 ? "99+" : v.unread}</span>` : "";
       const safePath = escapeHtml(s.path);
       const safeId = escapeHtml(s.id);
       html.push(`
-        <div class="session-item ${active}" data-path="${safePath}" data-id="${safeId}" title="${escapeHtml(s.firstMessage || s.name || s.fileName)}">
-          <div class="s-title">${escapeHtml(titleText)}</div>
+        <div class="session-item ${active}${running}" data-path="${safePath}" data-id="${safeId}" title="${escapeHtml(s.firstMessage || s.name || s.fileName)}">
+          <div class="s-title">${unread}${escapeHtml(titleText)}</div>
           <div class="s-meta">${escapeHtml(metaText)}</div>
           <div class="s-actions">
+            <button class="kill" title="关闭该会话的运行进程"${isSessionBusy(s.path) ? "" : " style=\"opacity:.4\""}>⏹</button>
             <button class="del" title="删除">×</button>
           </div>
         </div>
@@ -1088,9 +1264,18 @@ function renderSessionList() {
   // 绑定点击 / 删除事件
   listEl.querySelectorAll(".session-item").forEach(el => {
     el.addEventListener("click", (e) => {
-      if (e.target.closest(".del")) return;
+      if (e.target.closest(".del") || e.target.closest(".kill")) return;
       const p = el.dataset.path;
       if (p) switchToSession(p);
+    });
+  });
+  // v0.9: ⏹ 关闭该会话的运行进程（不删文件、不影响其它会话）
+  listEl.querySelectorAll(".session-item .kill").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const item = btn.closest(".session-item");
+      const p = item.dataset.path;
+      if (p) closeSessionProcess(p);
     });
   });
   listEl.querySelectorAll(".session-item .del").forEach(btn => {
@@ -1103,9 +1288,9 @@ function renderSessionList() {
 }
 
 function highlightActiveSession() {
-  if (!currentSessionPath) return;
+  if (!activeSessionKey) return;
   document.querySelectorAll(".session-item").forEach(el => {
-    el.classList.toggle("active", el.dataset.path === currentSessionPath);
+    el.classList.toggle("active", el.dataset.path === activeSessionKey);
   });
 }
 
@@ -1122,21 +1307,22 @@ function switchToSession(filePath) {
   // v0.7: 切去别的会话 = 放弃懒创建的新会话（零文件产生，无垃圾可清）
   pendingNewSession = false;
   pendingFirstPrompt = null;
-  if (filePath === currentSessionPath) {
-    // 点当前会话：不做 switch（pi 内部切换约数秒），直接重新拉取历史消息
+  if (filePath === activeSessionKey) {
+    // 点当前会话：不重发，直接重新拉取历史消息
     rpc({ type: "get_messages" });
     return;
   }
-  // 跨会话切换：给个即时反馈（pi 内部 rebind 扩展需要几秒）
-  const note = document.createElement("div");
-  note.className = "msg assistant switching-note";
-  note.id = "switching-note";
-  note.textContent = "⏳ 正在切换会话…";
-  const empty = messagesEl.querySelector(".empty-hint");
-  if (empty) empty.remove();
-  messagesEl.appendChild(note);
-  scrollBottom();
-  rpc({ type: "switch_session", sessionPath: filePath });
+  // v0.9: 每个会话一个独立 pi 进程 —— 切换 = 前端换视图容器 + server 换路由，
+  // 不用 pi 的 switch_session（无需等待，旧容器内容保留，后台会话继续累积）
+  switchActiveSession(filePath);
+  if (ws.readyState === 1) {
+    // 订阅：保证后台/切换过程中的记录继续到达
+    ws.send(JSON.stringify({ type: "subscribe_session", session: filePath }));
+  }
+  rpc({ type: "get_state" });
+  rpc({ type: "get_messages" });
+  rpc({ type: "get_commands" });
+  renderSessionList();
 }
 
 async function deleteSession(filePath, id) {
@@ -1607,7 +1793,8 @@ function refreshModelSelect() {
 }
 
 function scrollBottom() {
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  // v0.9: 滚动容器永远是 #messages（视图容器只是它的子项）
+  MESSAGES_ROOT.scrollTop = MESSAGES_ROOT.scrollHeight;
 }
 
 // ---------- 交互 ----------
@@ -1904,6 +2091,8 @@ function startPendingNewSession() {
   pendingNewSession = true;
   pendingFirstPrompt = null;
   if (followUpQueue.length) { followUpQueue = []; renderQueueChips(); }
+  // v0.9: 新会话 = 新的视图容器（不复用旧会话的 DOM/状态）
+  switchActiveSession(`new:${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
   messagesEl.innerHTML = "";
   streamingEl = null;
   streamingBlocks = [];
@@ -1959,6 +2148,9 @@ function addEmptyHint() {
     <p>Pi 可以读取、编辑工作目录中的文件并执行命令</p>
   </div>`;
 }
+
+// v0.9: 启动时先为默认会话建视图容器（后续内容写进容器，而非 #messages 根）
+loadViewState("default");
 addEmptyHint();
 
 // ============================================================

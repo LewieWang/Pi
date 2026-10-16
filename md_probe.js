@@ -64,14 +64,16 @@ function check(name, cond, detail) {
     const bar = document.querySelector("#statusbar");
     r.statusbarHidden = bar ? bar.hidden : "missing";
     r.statusbarText = bar ? bar.textContent.replace(/\s+/g, " ").trim().slice(0, 160) : "";
-    // 折叠条
-    const kids = [...document.querySelectorAll("#messages > *")].filter(el =>
-      el.classList.contains("msg") || el.classList.contains("tool-card") || el.classList.contains("tool-result"));
+    // 折叠条（v0.9: 消息在 .session-view 容器内，必须用后代选择器）
+    const kids = document.querySelectorAll("#messages .msg, #messages .tool-card, #messages .tool-result");
     r.msgNodes = kids.length;
     r.collapseBar = !!document.querySelector(".collapse-bar");
-    // 用户气泡 markdown 化
-    const u = document.querySelector("#messages .msg.user");
-    r.userMdBody = u ? !!u.querySelector(".md-body") : false;
+    // 用户气泡 markdown 化（v0.9: live 会话若已被上下文压缩，历史里可能无 user
+    // 消息 → 不做假失败，如实报告数量）
+    const users = [...document.querySelectorAll("#messages .msg.user")];
+    r.userTotal = users.length;
+    r.userWithMd = users.filter(u => u.querySelector(".md-body")).length;
+    r.userMdBody = r.userTotal === 0 ? null : r.userWithMd === r.userTotal;
     return r;
   });
   console.log("  A 详情:", JSON.stringify(a));
@@ -79,7 +81,11 @@ function check(name, cond, detail) {
   check("存在结构化 markdown 元素", a.structured > 0, `${a.structured} 个含块级元素`);
   check("md-body white-space=normal", a.mdWhiteSpace === "normal", a.mdWhiteSpace);
   check("状态栏可见且有内容", a.statusbarHidden === false && a.statusbarText.length > 5, a.statusbarText.slice(0, 80));
-  check("用户气泡也 markdown 化", a.userMdBody === true);
+  if (a.userTotal > 0) {
+    check("用户气泡也 markdown 化", a.userMdBody === true, `${a.userWithMd}/${a.userTotal}`);
+  } else {
+    console.log(`  · SKIP 用户气泡断言 :: live 会话历史中无 user 消息（已压缩）`);
+  }
   if (a.msgNodes > 30) {
     check("超长对话出现折叠条", a.collapseBar === true, `${a.msgNodes} 节点`);
   } else {
