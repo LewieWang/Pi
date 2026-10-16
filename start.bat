@@ -5,7 +5,7 @@ rem Default project dir: D:\PI\workspace  (Pi's working directory, change as nee
 rem Default port: 3210
 
 set PROJECT_DIR=%~1
-if "%PROJECT_DIR%"=="" set PROJECT_DIR=D:\PI\workspace
+if "%PROJECT_DIR%"=="" set PROJECT_DIR=%~dp0..\workspace
 
 set PORT=%~2
 if "%PORT%"=="" set PORT=3210
@@ -21,6 +21,6 @@ echo  Close this window to stop the service.
 echo ================================================
 
 start "" http://localhost:%PORT%
-cd /d D:\PI\pi-webui
+cd /d %~dp0
 node server.js --port %PORT% --cwd "%PROJECT_DIR%"
 pause
