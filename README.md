@@ -222,13 +222,31 @@ git cat-file blob <快照hash>:src/app.js > recovery.js
 ## 架构
 
 ```
-浏览器 (public/)  ↔  WebSocket  ↔  server.js  ↔  pi --mode rpc 子进程
-                              │
+浏览器 (public/)  ↔  WebSocket  ↔  server.js  ↔  pi --mode rpc 子进程池
+                              │                       （每会话一个进程，v0.9）
                               ├→ /api/sessions/list    (文件系统扫 *.jsonl，v0.7 起只返回有消息的会话)
-                              ├→ /api/sessions/delete  (fs.unlink)
+                              ├→ /api/sessions/delete  (fs.unlink，同时杀掉占用该文件的进程)
                               ├→ /api/config           (返回上传上限等信息)
                               └→ /api/upload           (multipart → .pi-uploads/)
 ```
+
+### 会话进程池（v0.9）
+
+server 为**每个会话**按需 spawn 一个独立的 `pi --mode rpc` 子进程，空闲保留：
+
+- `POOL: Map<key, entry>` —— key 为会话文件路径，临时会话为 `new:<ts>`，无会话时为 `default`
+- `FILE_INDEX: Map<sessionFile, entry>` —— 反查，保证「一 jsonl 只对应一个进程」（防双写损坏）
+- 临时会话（`new:`）spawn 时主动发一次 `new_session`，拿到**全新**会话文件
+  （只传 `--session-dir` 时 pi 会恢复“最近一个会话”，新消息会写进旧 jsonl）
+- 记录帧一律带 `session` 字段；客户端只收到自己订阅过的会话（`ws.sessions`，含进程对象身份）
+- 生命周期：`close_session`（侧栏 ⏹）/ 删除会话 / `--pool-idle-timeout`（默认 1800 秒空闲回收）/ `SIGINT` 全量关闭
+- **pi 会在收到首条 prompt 时替换 `new_session` 建的文件**（空会话轮换），前端视图会跟随真实文件重映射
+
+前端每个会话一个 DOM 容器（`.session-view`）+ 一份渲染状态；切换 = 换容器 + 换状态。
+后台会话的记录仍然渲染进它自己的容器（累积不丢），完成后在侧栏显示未读角标；
+运行中的会话有呼吸动效。调试钩子：`window.__piwebui_pool`（`activeKey/views/viewText/busy/unread`）。
+
+单会话兼容：旧前端不传 `session` 字段时，全部走 `default` 进程，行为与 v0.8 一致。
 
 server 启动时（pi 惰性启动之前）执行 `sweepEmptySessions()`：删除「有 session 头、
 零 message」的遗留空会话文件（usage.jsonl 等内部文件按名排除，双护栏）。
@@ -238,10 +256,10 @@ Pi 的 RPC 协议文档在：
 
 ## 文件改动历史
 
-- `server.js` — RPC 桥接 + 历史会话 HTTP API + 上传端点 + `--max-upload` + 会话扫描（v0.6 空会话检测 → v0.7 scanSessionFiles 重构 + API 过滤 + 启动清扫 sweepEmptySessions + usage.jsonl 排除）
-- `public/app.js` — 侧边栏渲染 / 切换 / 删除 / 搜索 / 重命名 / 压缩 / 导出 + 附件状态机 + Skill 弹窗 + 拖拽 / Ctrl+V + `/` 补全 + 灯箱 + Markdown 渲染接线 + 状态栏 + 长对话折叠 + 空白消息过滤 + 轮数显示 + v0.7 懒创建 new_session（pendingNewSession/pendingFirstPrompt/flush 重建气泡）+ 双保险过滤（v0.6 降噪 UI 已拆除）
+- `server.js` — **v0.9 会话进程池**：每会话独立 `pi --mode rpc` 子进程（`POOL`/`FILE_INDEX`）、会话路由（帧带 `session`，按订阅投递）、`close_session`/空闲回收/删除即杀、`pool_state` 广播、按会话分开的 git 锚点；RPC 桥接 + 历史会话 HTTP API + 上传端点 + `--max-upload` + 会话扫描（v0.6 空会话检测 → v0.7 scanSessionFiles 重构 + API 过滤 + 启动清扫 sweepEmptySessions + usage.jsonl 排除）
+- `public/app.js` — **v0.9 多会话视图**：每会话 `.session-view` 容器 + 状态存取（切换=换容器）、`rpc` 带 `session` 路由、后台累积渲染、未读角标、运行中动效、侧栏 ⏹ 关进程、队列按会话归属清理；侧边栏渲染 / 切换 / 删除 / 搜索 / 重命名 / 压缩 / 导出 + 附件状态机 + Skill 弹窗 + 拖拽 / Ctrl+V + `/` 补全 + 灯箱 + Markdown 渲染接线 + 状态栏 + 长对话折叠 + 空白消息过滤 + 轮数显示 + v0.7 懒创建 new_session（pendingNewSession/pendingFirstPrompt/flush 重建气泡）+ 双保险过滤（v0.6 降噪 UI 已拆除）
 - `public/markdown.js` — **v0.5 新增**，零依赖 Markdown 渲染器 + 语法高亮器（Node 可加载，27/27 XSS 单测）
-- `public/style.css` — 历史列表样式 + chip / toolbar / Skill 弹窗 / drag-over 高亮 + 命令补全面板 + 灯箱 + Markdown 排版 + 代码块 + token 着色 + 状态栏 + 折叠条 + 空白占位（v0.6 降噪行样式已删）
+- `public/style.css` — 历史列表样式 + chip / toolbar / Skill 弹窗 / drag-over 高亮 + 命令补全面板 + 灯箱 + Markdown 排版 + 代码块 + token 着色 + 状态栏 + 折叠条 + 空白占位 + v0.9 `.session-view` 容器 / 运行中呼吸点 / 未读角标（v0.6 降噪行样式已删）
 - `public/index.html` — 侧边栏 DOM + 顶栏操作按钮 + 新版 composer (chips + toolbar + popover) + 补全面板 + 灯箱容器 + markdown.js 引用 + 状态栏容器 + inline favicon + 版本号
 
 回滚到 v0.2：`cp server.js.bak server.js && cp public/*.bak public/`

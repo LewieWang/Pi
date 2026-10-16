@@ -300,6 +300,12 @@ C:\Users\lewie\.workbuddy\binaries\node\versions\22.22.2-6\node_modules\@earendi
 
 ## P2-⑩ 并行后台会话
 
+> **状态：已完成（v0.9，2026-10-16）**。三次小步提交，每步可回退：
+> `f29da0e` server 进程池 → `ac38b91` 前端多会话视图 → `9db6cc7` 会话文件轮换修复。
+> 新增 `parallel_probe.js`（26/26）；全量回归 edit 20/20、steer 15/15、ui 26/26、
+> trace 25/25、gitfiles 36/36、md 7/7。还原点 `6dc9804`。
+> 上线需用户在无任务时段重启 server（重启会杀当前任务进程）。
+
 ```text
 任务：把 Pi WebUI 从单会话升级为并行后台会话——多个会话可同时运行，各自独立的 pi --mode rpc 子进程，互不干扰，可随时切换查看。
 

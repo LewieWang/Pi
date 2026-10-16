@@ -1350,6 +1350,18 @@ function switchToSession(filePath) {
   // v0.9: 每个会话一个独立 pi 进程 —— 切换 = 前端换视图容器 + server 换路由，
   // 不用 pi 的 switch_session（无需等待，旧容器内容保留，后台会话继续累积）
   switchActiveSession(filePath);
+  // v0.9: 队列项带会话归属——切换后丢弃旧会话的队列项，否则它们会永久堵在队首
+  // （pumpFollowUpQueue 不会投给别的会话）
+  const owner = currentSessionPath || null;
+  if (followUpQueue.length) {
+    const keep = followUpQueue.filter((x) => (x.sessionId || null) === owner);
+    if (keep.length !== followUpQueue.length) {
+      const dropped = followUpQueue.length - keep.length;
+      followUpQueue = keep;
+      renderQueueChips();
+      addSystemNote(`已丢弃 ${dropped} 条其它会话的 steer 队列项`);
+    }
+  }
   if (ws.readyState === 1) {
     // 订阅：保证后台/切换过程中的记录继续到达
     ws.send(JSON.stringify({ type: "subscribe_session", session: filePath }));
