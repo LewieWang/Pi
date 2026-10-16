@@ -195,9 +195,10 @@
   document.addEventListener("DOMContentLoaded", () => {
     const btn = document.getElementById("btn-trace");
     if (btn) btn.addEventListener("click", open);
-    // Esc 关闭
+    // Esc 关闭（面板可能从未打开——DOM 尚未创建时必须空保护）
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && !document.getElementById("trace-panel").hidden) close();
+      const panel = document.getElementById("trace-panel");
+      if (e.key === "Escape" && panel && !panel.hidden) close();
     });
   });
 

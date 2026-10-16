@@ -16,3 +16,7 @@
 # —— 编辑器/系统 ——
 .DS_Store
 Thumbs.db
+
+# —— pi-webui 设置持久化（v0.10）——
+/pi-webui/config.json
+/pi-webui/config.json.tmp

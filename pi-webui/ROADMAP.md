@@ -336,6 +336,14 @@ C:\Users\lewie\.workbuddy\binaries\node\versions\22.22.2-6\node_modules\@earendi
 
 ## P2-⑪ 设置面板
 
+> **状态：已完成（v0.10，2026-10-16）**。提交见 Pi monorepo。
+> 面板：⚙ 按钮（模型区旁）→ 模型（provider 分组 + 详情行）/ 思维级别（协议原生 set_thinking_level，
+> get_state.thinkingLevel 权威回读）/ 登录凭据只读（仅 provider+type，无密钥）/ 保存为默认。
+> 持久化：server 端 config.json（schema strict：未知键 400；原子写；--config/--auth-file 可覆盖，探针隔离用）。
+> spawn 默认值：config.json 的 model → --model 启动参；thinkingLevel → spawn 后 fire-and-forget set_thinking_level。
+> 新增 probes/settings_probe.js（28/28，含 fail-open 降级与密钥不泄漏断言）；顺带修 trace.js Esc 空引用。
+> **激活方式：Ctrl+F5 即可热切换（rpc 透传不需重启）；/api/settings 与 spawn 默认值需重启 server 一次。**
+
 ```text
 任务：给 Pi WebUI 加设置面板——模型/默认参数/OAuth 状态集中管理，改设置免重启生效。
 

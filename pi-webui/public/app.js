@@ -24,6 +24,8 @@ let sessionStartedAt = Date.now(); // 会话开始时间，用于面板里的耗
 let lastUsage = null;              // 流式过程中最近一次 usage（message_update）
 let lastContextTokens = 0;         // 最近一条 assistant 消息的总输入 tokens ≈ 当前上下文占用
 let modelContextWindow = null;     // 当前模型的上下文窗口（来自 get_available_models）
+let currentThinkingLevel = null;   // v0.10: 当前思维级别（get_state.thinkingLevel）
+let thinkingLevels = null;         // v0.10: 当前模型支持的级别（get_available_thinking_levels）
 let roundHadAssistant = false;     // 本轮是否产生过 assistant 消息
 let messageCount = 0;
 
@@ -550,6 +552,9 @@ function handleResponse(rec) {
         refreshModelSelect();
         modelContextWindow = findModelWindow(currentModel.provider, currentModel.id);
       }
+      // v0.10: 设置面板需要当前思维级别（协议原生字段）
+      currentThinkingLevel = typeof d.thinkingLevel === "string" ? d.thinkingLevel : null;
+      if (window.__onStateForSettings) window.__onStateForSettings(currentThinkingLevel);
       updateStats(d.messageCount);
       updateStatusBar();
       // v0.9: 视图始终跟随真实会话文件。注意 pi 会在收到首条 prompt 时替换
@@ -594,6 +599,11 @@ function handleResponse(rec) {
       if (currentModel) modelContextWindow = findModelWindow(currentModel.provider, currentModel.id);
       updateStatusBar();
       break;
+    case "get_available_thinking_levels":
+      // v0.10: 设置面板用（当前模型支持的级别）
+      thinkingLevels = Array.isArray(d.levels) ? d.levels : null;
+      if (window.__onThinkingLevels) window.__onThinkingLevels(thinkingLevels);
+      break;
     case "get_commands":
       allCommands = d.commands || [];
       availableSkills = allCommands.filter(c => c.source === "skill");
@@ -608,6 +618,10 @@ function handleResponse(rec) {
         updateStatusBar();
         addSystemNote(`已切换模型: ${d.provider}/${d.id}`);
       }
+      break;
+    case "set_thinking_level":
+      // v0.10: 响应只有 success 标志，重新拉权威状态（get_state 带 thinkingLevel）
+      if (rec.success) rpc({ type: "get_state" });
       break;
     case "set_session_name":
       // 改名后刷新当前会话 + 列表
@@ -2478,6 +2492,19 @@ function extToast(message, type) {
 // ---------- 测试钩子（探针专用，不发送任何 RPC） ----------
 // v0.7: trace.js 读取当前会话文件路径（轨迹面板数据源）
 window.__piwebui_state = { getSessionPath: () => currentSessionPath };
+// v0.10: 设置面板桥（settings.js 经此发 rpc / 读共享状态，避免环形依赖）
+window.__piwebui_settings = {
+  rpc,
+  state: () => ({
+    models: models,
+    currentModel: currentModel,
+    thinkingLevel: currentThinkingLevel,
+    contextWindow: modelContextWindow,
+  }),
+  onThinkingLevels: (fn) => { window.__onThinkingLevels = fn; },
+  onState: (fn) => { window.__onStateForSettings = fn; },
+  requestThinkingLevels: () => rpc({ type: "get_available_thinking_levels" }),
+};
 
 // v0.9: 会话视图/进程池调试与探针钩子
 window.__piwebui_pool = {

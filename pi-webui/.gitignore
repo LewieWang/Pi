@@ -4,3 +4,7 @@ sessions/
 *.log
 server.js.bak
 *.bak
+
+# —— v0.10 设置持久化（可能含个性化默认值，不入库）——
+config.json
+config.json.tmp

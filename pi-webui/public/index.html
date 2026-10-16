@@ -30,14 +30,17 @@
 
     <div class="sidebar-section">
       <div class="section-title">模型</div>
-      <select id="model-select"></select>
+      <div class="model-row">
+        <select id="model-select"></select>
+        <button id="btn-settings" class="btn-settings" title="设置面板（模型 / 思维级别 / 登录凭据）">⚙</button>
+      </div>
     </div>
     <div class="sidebar-section">
       <div class="section-title">工作目录</div>
       <div id="cwd" class="cwd">-</div>
     </div>
     <!-- 本次会话 stats 区块已移除：token 消耗改为每轮对话结束后在聊天区展示面板 -->
-    <div class="sidebar-footer">Pi RPC 桥接 · v0.7 (源头防空会话 + 懒创建 + 启动清扫)</div>
+    <div class="sidebar-footer">Pi RPC 桥接 · v0.10 (会话进程池 + 设置面板)</div>
   </aside>
 
   <!-- 主聊天区 -->
@@ -122,5 +125,6 @@
 <script src="trace.js"></script>
 <script src="files.js"></script>
 <script src="app.js"></script>
+<script src="settings.js"></script>
 </body>
 </html>

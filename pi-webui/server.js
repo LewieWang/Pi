@@ -13,6 +13,7 @@
  */
 const http = require("http");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const readline = require("readline");
 const { spawn } = require("child_process");
@@ -35,6 +36,73 @@ const SESSION_DIR = path.resolve(getArg("--session-dir", path.join(__dirname, "s
 const EPHEMERAL = hasFlag("--ephemeral");
 const INITIAL_NAME = getArg("--name", "");
 const PI_MODEL = getArg("--model", "minimax/MiniMax-M3"); // 默认模型，避免内置目录模型的协议不匹配
+
+// ---------- v0.10: P2-⑪ 设置面板（config.json 持久化 + OAuth 只读） ----------
+// config.json 存 pi-webui/ 下（--config 可覆盖，探针用临时路径隔离）。
+// schema 严格：写入时未知键/类型错误直接 400；读取时未知键忽略（fail-open）。
+const SETTINGS_FILE = getArg("--config", path.join(__dirname, "config.json"));
+const AUTH_FILE = getArg("--auth-file", path.join(os.homedir(), ".pi", "agent", "auth.json"));
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+function loadSettings() {
+  try {
+    const j = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+    const out = {};
+    if (j.model && typeof j.model === "object"
+        && typeof j.model.provider === "string" && typeof j.model.id === "string") {
+      out.model = { provider: j.model.provider, id: j.model.id };
+    }
+    if (typeof j.thinkingLevel === "string" && THINKING_LEVELS.has(j.thinkingLevel)) {
+      out.thinkingLevel = j.thinkingLevel;
+    }
+    return out;
+  } catch (e) { return {}; } // 不存在/损坏 → 空默认（fail-open）
+}
+
+function validateSettings(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("设置必须是 JSON 对象");
+  const unknown = Object.keys(body).filter((k) => k !== "model" && k !== "thinkingLevel");
+  if (unknown.length) throw new Error(`未知设置项: ${unknown.join(", ")}`);
+  const out = {};
+  if (body.model !== undefined) {
+    if (!body.model || typeof body.model !== "object" || Array.isArray(body.model)) throw new Error("model 必须是对象");
+    const uk = Object.keys(body.model).filter((k) => k !== "provider" && k !== "id");
+    if (uk.length) throw new Error(`model 未知字段: ${uk.join(", ")}`);
+    if (typeof body.model.provider !== "string" || typeof body.model.id !== "string"
+        || !body.model.provider || !body.model.id) throw new Error("model.provider/model.id 必须是非空字符串");
+    out.model = { provider: body.model.provider, id: body.model.id };
+  }
+  if (body.thinkingLevel !== undefined) {
+    if (typeof body.thinkingLevel !== "string" || !THINKING_LEVELS.has(body.thinkingLevel)) {
+      throw new Error(`thinkingLevel 必须是 ${[...THINKING_LEVELS].join("/")}`);
+    }
+    out.thinkingLevel = body.thinkingLevel;
+  }
+  return out;
+}
+
+function saveSettings(next) {
+  const merged = { ...loadSettings(), ...next };
+  const tmp = SETTINGS_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(merged, null, 2) + "\n");
+  fs.renameSync(tmp, SETTINGS_FILE); // 原子替换
+  return merged;
+}
+
+/** 登录凭据只读摘要：只返回 provider + type，绝不返回 key/token */
+function readAuthProviders() {
+  try {
+    const j = JSON.parse(fs.readFileSync(AUTH_FILE, "utf8"));
+    return Object.keys(j).sort().map((p) => ({
+      provider: p,
+      type: (j[p] && typeof j[p] === "object" && j[p].type) ? String(j[p].type) : "unknown",
+    }));
+  } catch (e) { return []; }
+}
+
+// 启动时读一次作为 spawn 默认值（「下次启动读取为默认值」）
+const START_SETTINGS = loadSettings();
+const SPAWN_MODEL = START_SETTINGS.model ? `${START_SETTINGS.model.provider}/${START_SETTINGS.model.id}` : PI_MODEL;
 // v0.3: 附件上传 — 单文件上限（MB）+ 落盘目录
 const MAX_UPLOAD_BYTES = parseInt(getArg("--max-upload", "25"), 10) * 1024 * 1024;
 const UPLOAD_DIR = path.join(WORK_DIR, ".pi-uploads");
@@ -100,7 +168,7 @@ function keyIsSessionFile(key) {
 }
 
 function spawnEntry(key) {
-  const piArgs = ["--mode", "rpc", "--model", PI_MODEL];
+  const piArgs = ["--mode", "rpc", "--model", SPAWN_MODEL];
   let sessionFile = null;
   if (EPHEMERAL) {
     piArgs.push("--no-session");
@@ -127,6 +195,13 @@ function spawnEntry(key) {
   // 拿到全新文件，保证「一进程一会话文件」不变量。
   if (key.startsWith("new:") && !EPHEMERAL) {
     entry.proc.stdin.write(JSON.stringify({ id: `new-${++uiSeq}`, type: "new_session" }) + "\n");
+  }
+  // v0.10: config.json 里的 thinkingLevel 作为新 spawn 进程的默认值（模型已由
+  // --model 传入）。fire-and-forget，与 new_session 同模式；pi 会自行排队。
+  if (START_SETTINGS.thinkingLevel) {
+    try {
+      entry.proc.stdin.write(JSON.stringify({ id: `cfg-${++uiSeq}`, type: "set_thinking_level", level: START_SETTINGS.thinkingLevel }) + "\n");
+    } catch (e) { /* fail-open：默认级别不阻塞启动 */ }
   }
 
   // 关键：按 LF 切分 JSONL，不能用 readline（会错误切分 U+2028/U+2029）
@@ -897,6 +972,30 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: e.message }));
       }
+      return;
+    }
+    if (pathname === "/api/settings" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        settings: loadSettings(),
+        auth: readAuthProviders(), // 仅 provider + type，无任何密钥材料
+        file: SETTINGS_FILE,
+      }));
+      return;
+    }
+    if (pathname === "/api/settings" && req.method === "POST") {
+      let body = "";
+      req.on("data", (c) => { body += c; if (body.length > 65536) req.destroy(); });
+      req.on("end", () => {
+        try {
+          const saved = saveSettings(validateSettings(JSON.parse(body || "{}")));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ settings: saved }));
+        } catch (e) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
       return;
     }
     if (pathname === "/api/config" && req.method === "GET") {
