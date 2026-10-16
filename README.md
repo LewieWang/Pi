@@ -262,7 +262,7 @@ Pi 的 RPC 协议文档在：
 - `public/style.css` — 历史列表样式 + chip / toolbar / Skill 弹窗 / drag-over 高亮 + 命令补全面板 + 灯箱 + Markdown 排版 + 代码块 + token 着色 + 状态栏 + 折叠条 + 空白占位 + v0.9 `.session-view` 容器 / 运行中呼吸点 / 未读角标（v0.6 降噪行样式已删）
 - `public/index.html` — 侧边栏 DOM + 顶栏操作按钮 + 新版 composer (chips + toolbar + popover) + 补全面板 + 灯箱容器 + markdown.js 引用 + 状态栏容器 + inline favicon + 版本号
 
-回滚到 v0.2：`cp server.js.bak server.js && cp public/*.bak public/`
+回滚到 v0.2（v0.2 快照保留在 `rollback/` 目录）：`cp rollback/server.js.v0.2.bak server.js && cp rollback/app.js.v0.2.bak public/app.js && cp rollback/style.css.v0.2.bak public/style.css && cp rollback/index.html.v0.2.bak public/index.html`
 注：v0.3 是今天上午的输入增强版本，v0.4 是下午的补全 + 灯箱版本，两个增量分别 313 / 240 行 app.js。当前 .bak 是 v0.2，跳过中间版本；如需回滚到 v0.3/v0.4，需另存中间快照。
 v0.5 为纯前端改动（markdown.js 新增 + app.js/index.html/style.css 修改），server.js 零改动，浏览器强刷（Ctrl+F5）即生效。
 v0.6 改 server.js（listSessionFiles 加空会话检测）+ 前端；前端刷新即生效大部分，空会话精确检测需重启 server。探针：md_probe.js（v0.5）+ session_probe.js（v0.6，16 项断言）。

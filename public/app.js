@@ -410,6 +410,13 @@ function handleRecord(rec) {
       break;
     case "message_end":
       finalizeMessage(rec.message);
+      // v0.9: 新会话首轮发消息后，jsonl 随时落盘——不等到 agent_settled 才刷侧栏，
+      // 流式期间就让用户在侧栏里看到这个新会话。防抖：同一轮里多条 message_end 只刷一次。
+      if (currentSessionPath && !allSessions.some((s) => s.path === currentSessionPath)
+          && !window.__pendingSessionRefresh) {
+        window.__pendingSessionRefresh = true;
+        setTimeout(() => { window.__pendingSessionRefresh = false; refreshSessionsFromServer(); }, 0);
+      }
       break;
     case "tool_execution_start":
       addToolCard(rec.toolCallId, rec.toolName, rec.args);
@@ -435,8 +442,7 @@ function handleRecord(rec) {
       updateStatusBar();
       // v0.6.3: settle 后 forkable 列表重新对齐（含本轮新 user 消息）
       refreshForkable();
-      // v0.7: 懒创建的首条消息落盘后，新会话文件才存在（new_session 时的
-      // refresh 早于文件创建）；仅当当前会话不在已知列表时补刷，零常态开销。
+      // v0.9: message_end 阶段已补刷，这里防重重触发；仅作兑底（你预测极边、message_end 未触达的场景）
       if (currentSessionPath && !allSessions.some(s => s.path === currentSessionPath)) {
         refreshSessionsFromServer();
       }
