@@ -1,0 +1,18 @@
+# —— 依赖与构建产物（可重建）——
+**/node_modules/
+**/dist/
+**/*.bak
+
+# —— 运行期数据（绝不上传）——
+**/sessions/
+**/.pi-uploads/
+**/*.log
+**/_dbg_*
+
+# —— 公开上游克隆（备份无意义）——
+/workspace/pi/
+/workspace/SoL-Pi/
+
+# —— 编辑器/系统 ——
+.DS_Store
+Thumbs.db
