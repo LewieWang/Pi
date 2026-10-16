@@ -516,3 +516,14 @@ Pi 的底座（`--mode rpc` JSONL）本就是多客户端设计，WebUI 只是�
 - 待用户动作：<如：需在无任务时段重启 server.js 后生效>
 - 遗留/风险：<如有>
 ```
+
+## v0.9.1（2026-10-16）
+
+- **侧栏样式整理**：`.s-meta` 强制单行 ellipsis；`.session-item` 补 `min-width: 0` 让 ellipsis 真正生效；item padding 收紧。标题不再裸用 firstMessage 截断——`smartSnippet()` 去 URL/markdown 符号/emoji 后再截 40 字，无内容时回退本地短时间戳。
+- **未读角标语义**：当前活跃会话不再显示未读角标（正在看 = 无未读）。
+- **刷新丢历史修复（真回归）**：v0.9 多视图后，刷新页面的 `get_state` 响应携带真实会话 key（≠前端的 "default"）→ 走后台分发，历史渲染进后台视图且 finally 回切空视图。修复：初始装载 adopt——首个 get_state 响应分发完成后停在真实会话视图（`pendingAdoptKey`），孤儿 default 视图清理并留 alias；历史加载条件放宽（`sessionFile || messageCount>0`，兼容 ephemeral）。
+- **md_probe 安全重写**：旧版直连 3210 且 guard 只查 `msgs>40`，压缩过的 live 会话形同虚设——累计 4 次把测试 prompt 注入用户会话（其中一次落成独立 jsonl，制造"凭空多出的会话"）。新版自起 3211 `--ephemeral` 隔离实例，PHASE A 自造历史再刷新验证，19/19。
+- **探针路径修复**：探针移入 `probes/` 后 `path.join(__dirname, "server.js")` 全部失效，改为 `../server.js`。
+- 新增 `reload_probe.js`（4/4）：非 ephemeral 刷新恢复历史 + 二次刷新幂等。
+- 回归：parallel 26/26 · edit 20/20 · steer 15/15 · ui 26/26 · trace 25/25 · gitfiles 36/36 · md 19/19 · reload 4/4。
+- 教训：探针必须完全隔离自起实例；串行后台跑探针前必须确认 3211 无残留（`netstat -ano | grep :3211`）。
