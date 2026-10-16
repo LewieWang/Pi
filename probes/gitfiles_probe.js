@@ -69,7 +69,7 @@ fs.mkdirSync(path.join(PLAIN_CWD, "sessions"), { recursive: true });
 
 function startServer(cwd, sessDir, port) {
   const s = spawn(process.execPath,
-    [path.join(__dirname, "server.js"), "--port", String(port), "--cwd", cwd, "--session-dir", sessDir],
+    [path.join(__dirname, "..", "server.js"), "--port", String(port), "--cwd", cwd, "--session-dir", sessDir],
     { cwd: __dirname, stdio: ["ignore", "pipe", "pipe"] });
   s.stdout.on("data", (d) => process.stdout.write(`[srv${port}] ${d}`));
   s.stderr.on("data", (d) => process.stderr.write(`[srv${port}:err] ${d}`));

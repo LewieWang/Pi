@@ -1,19 +1,58 @@
 /**
- * v0.5 专项探针：Markdown 渲染 + 状态栏 + 长对话折叠
- * PHASE A: 历史消息渲染（自动加载后）
- * PHASE B: 发一条真实 prompt，验证流式 markdown 全链路
- * 运行: NODE_PATH=C:\Users\lewie\.workbuddy\binaries\node\workspace\node_modules node md_probe.js
+ * v0.9.1 专项探针：Markdown 渲染 + 状态栏 + 长对话折叠
+ * PHASE A: 造历史 → 刷新 → 历史消息 markdown 渲染（复制/高亮/用户气泡）
+ * PHASE B: 流式 markdown 全链路（HTML 结构渐进 + 终态结构化）
+ *
+ * v0.9.1 安全重写：自起 3211 隔离实例（--ephemeral），绝不直连 3210 live。
+ * 旧版直连 3210 且 guard 只查 msgs>40 —— 压缩过的 live 会话只剩几条可见消息，
+ * guard 形同虚设，PHASE B 把测试 prompt 注入用户会话 4 次（其中一次还落成
+ * 独立 jsonl，制造了"凭空多出的会话"）。隔离后 guard 概念整体废弃。
+ *
+ * 运行: NODE_PATH=C:\Users\lewie\.workbuddy\binaries\node\workspace\node_modules \
+ *       node md_probe.js
  */
 const { chromium } = require("playwright-core");
+const { spawn, execSync } = require("child_process");
+const http = require("http");
+const path = require("path");
 
-const BASE = "http://localhost:3210";
+const PORT = 3211;
+const BASE = `http://localhost:${PORT}`;
 const results = [];
 function check(name, cond, detail) {
   results.push({ name, pass: !!cond, detail: detail || "" });
   console.log(`  ${cond ? "✓" : "✗"} ${name}${detail ? " :: " + detail : ""}`);
 }
 
+function waitListen(ms) {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const poll = () => {
+      const req = http.get(`${BASE}/`, (res) => { res.resume(); resolve(); });
+      req.on("error", () => {
+        if (Date.now() - t0 > ms) reject(new Error("server not listening"));
+        else setTimeout(poll, 300);
+      });
+    };
+    poll();
+  });
+}
+
+const MD_PROMPT = "请严格用以下 Markdown 元素回复：一个 # 一级标题、一句 **加粗**、一个 - 列表项、一个 ```js 代码块（写 const x = 1;）、一个两列表格。不要有多余解释。";
+
+const server = spawn(process.execPath, [path.join(__dirname, "..", "server.js"), "--port", String(PORT), "--ephemeral"], {
+  cwd: __dirname,
+  stdio: ["ignore", "pipe", "pipe"],
+});
+server.stdout.on("data", (d) => process.stdout.write(`[server] ${d}`));
+server.stderr.on("data", (d) => process.stderr.write(`[server:err] ${d}`));
+const cleanup = () => { try { execSync(`taskkill /PID ${server.pid} /T /F`, { stdio: "ignore" }); } catch (e) { /* 已退出 */ } };
+process.on("exit", cleanup);
+
 (async () => {
+  await waitListen(15000);
+  console.log(`临时 server 已监听 ${BASE}`);
+
   const browser = await chromium.launch({
     executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe",
     headless: true,
@@ -37,16 +76,33 @@ function check(name, cond, detail) {
 
   await page.goto(BASE + "/", { waitUntil: "networkidle" });
 
-  // ---------- PHASE A: 历史渲染 ----------
-  console.log("=== PHASE A: 历史消息 Markdown 渲染 ===");
+  /** 发一条 prompt 并等本轮结算（token note 出现）。首条会触发 pi 惰性启动，等待更久。 */
+  async function sendAndWaitSettled(text, maxSec) {
+    await page.fill("#input", text);
+    await page.click("#btn-send");
+    for (let i = 0; i < maxSec; i++) {
+      await page.waitForTimeout(1000);
+      const done = await page.evaluate(() => !!document.querySelector("#messages .token-note"));
+      if (done) return true;
+    }
+    return false;
+  }
+
+  // ---------- PHASE A: 造历史 + 历史渲染 ----------
+  console.log("=== PHASE A: 造历史 → 刷新 → 历史渲染 ===");
+  const settledA = await sendAndWaitSettled(MD_PROMPT, 180);
+  check("首轮 prompt 结算（token note）", settledA);
+
+  // 刷新页面强制走历史渲染路径（renderMessages / renderHistoryAssistant）
+  await page.reload({ waitUntil: "networkidle" });
   let rendered = 0;
   for (let i = 0; i < 30; i++) {
     await page.waitForTimeout(1000);
     rendered = await page.evaluate(() =>
       document.querySelectorAll("#messages .msg, #messages .tool-result, #messages .history-note").length);
-    if (rendered > 5) break;
+    if (rendered >= 2) break;
   }
-  check("历史消息已渲染", rendered > 5, `${rendered} 个节点`);
+  check("历史消息已渲染", rendered >= 2, `${rendered} 个节点`);
 
   const a = await page.evaluate(() => {
     const r = {};
@@ -68,8 +124,7 @@ function check(name, cond, detail) {
     const kids = document.querySelectorAll("#messages .msg, #messages .tool-card, #messages .tool-result");
     r.msgNodes = kids.length;
     r.collapseBar = !!document.querySelector(".collapse-bar");
-    // 用户气泡 markdown 化（v0.9: live 会话若已被上下文压缩，历史里可能无 user
-    // 消息 → 不做假失败，如实报告数量）
+    // 用户气泡 markdown 化（隔离实例必然有 user 消息）
     const users = [...document.querySelectorAll("#messages .msg.user")];
     r.userTotal = users.length;
     r.userWithMd = users.filter(u => u.querySelector(".md-body")).length;
@@ -84,7 +139,7 @@ function check(name, cond, detail) {
   if (a.userTotal > 0) {
     check("用户气泡也 markdown 化", a.userMdBody === true, `${a.userWithMd}/${a.userTotal}`);
   } else {
-    console.log(`  · SKIP 用户气泡断言 :: live 会话历史中无 user 消息（已压缩）`);
+    check("用户气泡也 markdown 化", false, "历史中无 user 消息（异常）");
   }
   if (a.msgNodes > 30) {
     check("超长对话出现折叠条", a.collapseBar === true, `${a.msgNodes} 节点`);
@@ -117,26 +172,13 @@ function check(name, cond, detail) {
       return btn.textContent;
     });
     check("复制按钮点击反馈", copied === "已复制", `按钮文字: ${copied}`);
+  } else {
+    check("代码块带复制按钮", false, "历史中无代码块（异常）");
   }
 
   // ---------- PHASE B: 流式渲染 ----------
-  console.log("=== PHASE B: 流式 Markdown（发真实 prompt）===");
-  // 防误伤守卫：本阶段会发送真实 prompt。在 live 会话（消息多 / 正在流式中）
-  // 上跑会污染用户会话 —— 默认中止；确认要跑时设 MD_PROBE_ALLOW_LIVE=1。
-  const liveGuard = await page.evaluate(() => ({
-    msgs: document.querySelectorAll("#messages .msg").length,
-    sendDisabled: !!document.getElementById("btn-send")?.disabled,
-  }));
-  if (liveGuard.msgs > 40 || liveGuard.sendDisabled) {
-    const why = liveGuard.sendDisabled ? "发送中（isStreaming）" : `${liveGuard.msgs} 条消息，疑似 live 会话`;
-    console.error(`PHASE B 中止：${why}。`);
-    console.error("如确要在 live 会话上跑：设 MD_PROBE_ALLOW_LIVE=1；或改用隔离实例（参考 ui_probe.js 自起 server 模式）。意外注入的历史 prompt 需手动编辑重发清理。");
-    const failedNow = results.filter(r => !r.pass);
-    console.log(`\n===== ${results.length - failedNow.length}/${results.length} 通过（PHASE B 未执行）=====`);
-    await browser.close();
-    process.exit(1);
-  }
-  await page.fill("#input", "请严格用以下 Markdown 元素回复：一个 # 一级标题、一句 **加粗**、一个 - 列表项、一个 ```js 代码块（写 const x = 1;）、一个两列表格。不要有多余解释。");
+  console.log("=== PHASE B: 流式 Markdown（隔离实例发真实 prompt）===");
+  await page.fill("#input", MD_PROMPT);
   await page.click("#btn-send");
 
   // 等流式开始（出现流式 md-body）
@@ -158,12 +200,13 @@ function check(name, cond, detail) {
   });
   check("流式内容为 HTML 结构（非纯文本）", midStream && midStream.hasTags, midStream ? `len=${midStream.len}` : "null");
 
-  // 等本轮结束（token note 出现即一轮完结）
+  // 等本轮结束（token note 数量比 PHASE A 多 1 即本轮完结）
+  const baseNotes = await page.evaluate(() => document.querySelectorAll("#messages .token-note").length);
   let settled = false;
   for (let i = 0; i < 120; i++) {
     await page.waitForTimeout(1000);
-    settled = await page.evaluate(() => !!document.querySelector("#messages .token-note"));
-    if (settled) break;
+    const now = await page.evaluate(() => document.querySelectorAll("#messages .token-note").length);
+    if (now > baseNotes) { settled = true; break; }
   }
   check("本轮结束（token note 已追加）", settled);
 
@@ -194,4 +237,4 @@ function check(name, cond, detail) {
   const failed = results.filter(r => !r.pass);
   console.log(`\n===== ${results.length - failed.length}/${results.length} 通过 =====`);
   if (failed.length) { console.log("失败项:", failed.map(f => f.name).join(", ")); process.exit(1); }
-})().catch((e) => { console.error("探针崩溃:", e); process.exit(2); });
+})().catch((e) => { console.error("探针崩溃:", e); cleanup(); process.exit(2); });

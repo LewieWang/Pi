@@ -14,6 +14,7 @@
 const { chromium } = require("playwright-core");
 const { spawn, execSync } = require("child_process");
 const http = require("http");
+const path = require("path");
 
 const PORT = 3211;
 const BASE = `http://localhost:${PORT}`;
@@ -37,7 +38,7 @@ function waitListen(ms) {
   });
 }
 
-const server = spawn(process.execPath, ["server.js", "--port", String(PORT), "--ephemeral"], {
+const server = spawn(process.execPath, [path.join(__dirname, "..", "server.js"), "--port", String(PORT), "--ephemeral"], {
   cwd: __dirname,
   stdio: ["ignore", "pipe", "pipe"],
 });

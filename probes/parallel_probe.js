@@ -51,7 +51,7 @@ fs.writeFileSync(path.join(CWD, "note.txt"), "parallel probe\n");
 
 function startServer() {
   const s = spawn(process.execPath,
-    [path.join(__dirname, "server.js"), "--port", String(PORT), "--cwd", CWD, "--session-dir", SESS_DIR],
+    [path.join(__dirname, "..", "server.js"), "--port", String(PORT), "--cwd", CWD, "--session-dir", SESS_DIR],
     { cwd: __dirname, stdio: ["ignore", "pipe", "pipe"] });
   s.stdout.on("data", (d) => process.stdout.write(`[srv] ${d}`));
   s.stderr.on("data", (d) => process.stderr.write(`[srv:err] ${d}`));

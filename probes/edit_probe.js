@@ -45,7 +45,7 @@ function waitListen(ms) {
 // pi 会话写在 ~/.pi/agent/sessions/<encoded-tmpcwd>/，不碰真实项目。
 const TMP_CWD = fs.mkdtempSync(path.join(os.tmpdir(), "piwebui-edit-probe-"));
 const server = spawn(process.execPath,
-  [path.join(__dirname, "server.js"), "--port", String(PORT),
+  [path.join(__dirname, "..", "server.js"), "--port", String(PORT),
    "--cwd", TMP_CWD, "--session-dir", path.join(TMP_CWD, "sessions")],
   { cwd: __dirname, stdio: ["ignore", "pipe", "pipe"] });
 server.stdout.on("data", (d) => process.stdout.write(`[server] ${d}`));

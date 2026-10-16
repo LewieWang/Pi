@@ -85,7 +85,7 @@ const SYNTH_FILE = "synth-trace-test.jsonl";
 fs.writeFileSync(path.join(SESSION_DIR, SYNTH_FILE), buildSynthJsonl(300));
 
 const server = spawn(process.execPath,
-  [path.join(__dirname, "server.js"), "--port", String(PORT),
+  [path.join(__dirname, "..", "server.js"), "--port", String(PORT),
    "--cwd", TMP_CWD, "--session-dir", SESSION_DIR],
   { cwd: __dirname, stdio: ["ignore", "pipe", "pipe"] });
 server.stdout.on("data", (d) => process.stdout.write(`[server] ${d}`));

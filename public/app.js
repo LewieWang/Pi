@@ -57,6 +57,10 @@ const MESSAGES_ROOT = $("messages");
 // messagesEl 始终指向「当前活跃会话」的容器（切换 = 换容器 + 换状态）。
 let messagesEl = MESSAGES_ROOT;
 let activeSessionKey = "default";         // 当前活跃会话：会话文件路径 / new:<ts> / "default"
+// v0.9.1: 初始装载 adopt —— 页面刷新后前端 key 还是 "default"，而 get_state 响应
+// 携带真实会话 key。需要把前台切到真实会话，否则历史渲染进后台视图、
+// 前台永远停在空视图（刷新丢历史 bug）。用模块级标志跨出后台分发的 finally。
+let pendingAdoptKey = null;
 const sessionViews = new Map();           // key -> {el, st, unread}
 const viewAlias = new Map();              // 旧 key -> 新 key（default/new:<ts> rekey 后）
 const poolBusy = new Map();               // 会话 tag -> busy（来自 pool_state）
@@ -157,6 +161,13 @@ function handleRecordForSession(key, record) {
   key = resolveViewKey(key || activeSessionKey);
   if (key === activeSessionKey) { handleRecord(record); return; }
   const prevKey = activeSessionKey;
+  // v0.9.1: 初始装载 adopt —— 页面刚刷新时前景还是 "default" 空视图，而首批记录
+  // 属于真实会话 key：get_state 响应分发完成后停在该会话（不回切），
+  // 后续 get_messages 历史才会渲染进用户看得见的前台容器。
+  if (!historyLoadedOnce && !pendingNewSession && key !== prevKey
+      && record && record.type === "response" && record.command === "get_state") {
+    pendingAdoptKey = key;
+  }
   saveViewState();
   activeSessionKey = key; // 关键：临时切到该会话，否则视图内的 rekey/会话态逻辑会误判
   loadViewState(key);
@@ -164,8 +175,27 @@ function handleRecordForSession(key, record) {
     handleRecord(record);
   } finally {
     saveViewState();
-    activeSessionKey = prevKey;
-    loadViewState(prevKey);
+    // v0.9.1: 三种收尾——① 初始装载 adopt（停在目标会话，不回切）；
+    // ② handleRecord 内部主动重映射（new:<ts> 轮换 rekey）→ 跟随新 key；
+    // ③ 普通后台分发 → 回到原活跃会话。
+    const adoptNow = pendingAdoptKey && resolveViewKey(pendingAdoptKey) === key;
+    pendingAdoptKey = null;
+    if (adoptNow) {
+      // 收养后，旧前台空视图（"default"）成为孤儿：清掉并留 alias（迟到帧仍可路由）
+      const orphan = sessionViews.get(prevKey);
+      if (orphan && prevKey !== key && !orphan.el.querySelector(".msg, .tool-result")) {
+        sessionViews.delete(prevKey);
+        viewAlias.set(prevKey, key);
+        orphan.el.remove();
+      }
+      activeSessionKey = key;
+      loadViewState(key);
+    } else if (activeSessionKey === key) {
+      activeSessionKey = prevKey;
+      loadViewState(prevKey);
+    } else {
+      loadViewState(activeSessionKey);
+    }
     setSendState();
     updateStatusBar();
   }
@@ -210,6 +240,30 @@ function fmtRelative(mtime) {
   if (diff < 7*DAY_MS) return `${Math.floor(diff/DAY_MS)} 天前`;
   const d = new Date(mtime);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+/** 智能摘要：去掉 URL / markdown 标记 / 连续空白，再截前 n 字符。 */
+function smartSnippet(text, n) {
+  if (!text) return null;
+  let t = String(text)
+    .replace(/https?:\/\/\S+/g, "")                    // 去 URL
+    .replace(/[`*_>#~\-]/g, "")                        // 去常见 markdown 符号
+    .replace(/\[(.+?)\]\([^)]+\)/g, "$1")             // [text](url) -> text
+    .replace(/<[^>]+>/g, "")                           // 去 HTML
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "") // 去 emoji
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!t) return null;
+  if (t.length > n) t = t.slice(0, n - 1) + "…";
+  return t;
+}
+
+/** 短时间戳（10-15 10:47），用于无 name 无 firstMessage 的兑底。 */
+function fmtLocalTimeShort(localTime) {
+  if (!localTime) return null;
+  // localTime 形如 "2026-10-15 10:47:06+08:00" → 截成 "10-15 10:47"
+  const m = String(localTime).match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
+  return m ? `${m[2]}-${m[3]} ${m[4]}:${m[5]}` : null;
 }
 
 // 格式化 session 起始时间（本地时区）。优先用服务端拼接好的 localTime
@@ -523,9 +577,12 @@ function handleResponse(rec) {
         finishPendingNewSession();
         break;
       }
-      // 刷新页面后：消息面板还是欢迎页时，自动把当前会话的历史加载出来，
+      // 刷新页面后：自动把当前会话的历史加载出来，
       // 这样即使不点击会话（或点的就是当前会话）也能看到内容。
-      if (!historyLoadedOnce && currentSessionPath && messagesEl.querySelector(".empty-hint")) {
+      // v0.9.1: 去掉 empty-hint 条件（后台分发时临时视图没有 hint，会误判）；
+      // 再加 messageCount 兑底——ephemeral 模式没有 sessionFile，只能靠计数判断。
+      if (!historyLoadedOnce && !pendingNewSession
+          && (currentSessionPath || (d.messageCount || 0) > 0)) {
         historyLoadedOnce = true;
         rpc({ type: "get_messages" });
       }
@@ -1270,8 +1327,11 @@ function renderSessionList() {
   for (const [title, items] of groups) {
     html.push(`<div class="session-group-title">${escapeHtml(title)}</div>`);
     for (const s of items) {
-      const titleText = s.name || (s.firstMessage ? s.firstMessage.slice(0, 40) : "(空白会话)");
-      const started = fmtSessionStart(s);
+      // v0.9 修：title 优先用用户起的名；没有则智能摘要（去 URL / markdown 符号），
+      // 避免侧栏出现 “https://mp.weixin.…” 或“请严格用以下 Markdown…”当标题。
+      const cleaned = s.firstMessage ? smartSnippet(s.firstMessage, 40) : null;
+      const titleText = s.name || cleaned || fmtLocalTimeShort(s.localTime) || "(空白会话)";
+      const started = fmtLocalTimeShort(s.localTime) || fmtSessionStart(s);
       const sizeText = s.size >= 1024 ? (s.size/1024).toFixed(1) + "KB" : s.size + "B";
       // v0.6: 有轮数信息时显示（DSH archive 风格的状态信息），旧 server 无此字段时不显示；
       // v0.7: countsPartial（≥8MB 只扫 80 行）时显示 "N+ 轮" 表示是下界
@@ -1279,13 +1339,14 @@ function renderSessionList() {
         ? ` · ${s.userMessageCount}${s.countsPartial ? "+" : ""} 轮`
         : "";
       const metaText = started
-        ? `开始于 ${started} · ${fmtRelative(s.modified)}${turnText} · ${sizeText}`
+        ? `${started} · ${fmtRelative(s.modified)}${turnText} · ${sizeText}`
         : `${fmtRelative(s.modified)}${turnText} · ${sizeText}`;
       const active = s.path === activeSessionKey ? "active" : "";
       // v0.9: 运行中动效 + 后台未读角标
       const running = isSessionBusy(s.path) ? " running" : "";
       const v = sessionViews.get(resolveViewKey(s.path));
-      const unread = (v && v.unread) ? `<span class="s-unread">${v.unread > 99 ? "99+" : v.unread}</span>` : "";
+      // v0.9 修：当前活跃会话已上屏，不显示未读角标（用户正在看，未读 = 0 语义）
+      const unread = (v && v.unread && !active) ? `<span class="s-unread">${v.unread > 99 ? "99+" : v.unread}</span>` : "";
       const safePath = escapeHtml(s.path);
       const safeId = escapeHtml(s.id);
       html.push(`
