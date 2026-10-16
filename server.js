@@ -122,6 +122,12 @@ function spawnEntry(key) {
   const entry = { key, tag: key, proc, sessionFile, lastUsed: Date.now(), timer: null };
   POOL.set(key, entry);
   if (sessionFile) FILE_INDEX.set(sessionFile, entry);
+  // v0.9: 临时会话（new:<ts>）——仅传 --session-dir 时 pi 会恢复「最近一个会话」，
+  // 导致新会话的消息写进旧 jsonl（两个进程共写同一文件）。这里主动 new_session
+  // 拿到全新文件，保证「一进程一会话文件」不变量。
+  if (key.startsWith("new:") && !EPHEMERAL) {
+    entry.proc.stdin.write(JSON.stringify({ id: `new-${++uiSeq}`, type: "new_session" }) + "\n");
+  }
 
   // 关键：按 LF 切分 JSONL，不能用 readline（会错误切分 U+2028/U+2029）
   // 这里直接用 buffer indexOf，更可靠
@@ -241,9 +247,13 @@ function handlePiRecord(record, entry) {
         && record.success && record.data && record.data.sessionFile) {
       const sf = String(record.data.sessionFile);
       if (owner) {
+        // pi 可能换会话文件（如 new_session 建的空会话在首条 prompt 时被轮换），
+        // 同步清理旧映射，保证「一文件一进程」不变量
+        const old = owner.sessionFile;
+        if (old && old !== sf && FILE_INDEX.get(old) === owner) FILE_INDEX.delete(old);
         owner.sessionFile = sf;
         owner.tag = sf; // 记录携带真实路径后对外用路径标识
-        if (!FILE_INDEX.has(sf)) FILE_INDEX.set(sf, owner);
+        FILE_INDEX.set(sf, owner);
       }
     }
     // v0.8: 每轮结束（assistant 回复+其工具调用完成）→ git 锚点（静默、异步）

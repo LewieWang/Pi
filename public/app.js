@@ -58,7 +58,9 @@ const MESSAGES_ROOT = $("messages");
 let messagesEl = MESSAGES_ROOT;
 let activeSessionKey = "default";         // 当前活跃会话：会话文件路径 / new:<ts> / "default"
 const sessionViews = new Map();           // key -> {el, st, unread}
+const viewAlias = new Map();              // 旧 key -> 新 key（default/new:<ts> rekey 后）
 const poolBusy = new Map();               // 会话 tag -> busy（来自 pool_state）
+let poolSupported = false;                // server 是否支持会话进程池（hello 里带 sessions）
 
 // 视图需要保存/恢复的全局状态（切会话时切换）
 function defaultViewState() {
@@ -78,6 +80,7 @@ function defaultViewState() {
 }
 
 function ensureView(key) {
+  key = resolveViewKey(key);
   let v = sessionViews.get(key);
   if (!v) {
     const el = document.createElement("div");
@@ -86,6 +89,14 @@ function ensureView(key) {
     sessionViews.set(key, v);
   }
   return v;
+}
+
+/** 旧 key（default / new:<ts>）经 rekey 后指向新 key */
+function resolveViewKey(key) {
+  const seen = new Set();
+  let k = key;
+  while (viewAlias.has(k) && !seen.has(k)) { seen.add(k); k = viewAlias.get(k); }
+  return k;
 }
 
 /** 把当前全局状态存回活跃会话的视图 */
@@ -103,7 +114,11 @@ function saveViewState() {
 /** 把目标会话的视图装载为当前活跃视图（DOM 容器 swap + 全局状态 swap） */
 function loadViewState(key) {
   const v = ensureView(key);
-  if (v.el.parentNode !== MESSAGES_ROOT) MESSAGES_ROOT.appendChild(v.el); // append 即移动 = 换容器
+  if (v.el.parentNode !== MESSAGES_ROOT) {
+    // 先摘掉其它容器（避免多个会话同时上屏），再挂上目标容器
+    MESSAGES_ROOT.querySelectorAll(":scope > .session-view").forEach((el) => el.remove());
+    MESSAGES_ROOT.appendChild(v.el);
+  }
   const st = v.st || defaultViewState();
   streamingEl = st.streamingEl;
   streamingBlocks = st.streamingBlocks;
@@ -122,6 +137,7 @@ function loadViewState(key) {
 
 /** 切换活跃会话（保存当前 → 装载目标） */
 function switchActiveSession(key) {
+  key = resolveViewKey(key);
   if (key === activeSessionKey) return;
   saveViewState();
   activeSessionKey = key;
@@ -138,14 +154,17 @@ function switchActiveSession(key) {
  * 再切回活跃会话并重置共享 UI（发送按钮/状态栏）。
  */
 function handleRecordForSession(key, record) {
-  if (!key || key === activeSessionKey) { handleRecord(record); return; }
+  key = resolveViewKey(key || activeSessionKey);
+  if (key === activeSessionKey) { handleRecord(record); return; }
   const prevKey = activeSessionKey;
   saveViewState();
+  activeSessionKey = key; // 关键：临时切到该会话，否则视图内的 rekey/会话态逻辑会误判
   loadViewState(key);
   try {
     handleRecord(record);
   } finally {
     saveViewState();
+    activeSessionKey = prevKey;
     loadViewState(prevKey);
     setSendState();
     updateStatusBar();
@@ -156,9 +175,17 @@ function handleRecordForSession(key, record) {
 function rekeySessionView(oldKey, newKey) {
   if (!oldKey || !newKey || oldKey === newKey) return;
   if (!sessionViews.has(oldKey)) return;
-  const v = sessionViews.get(oldKey);
+  const src = sessionViews.get(oldKey);
+  if (sessionViews.has(newKey)) {
+    // 目标已存在（先后收到两个 key 的记录）：保留目标视图，丢弃源视图，
+    // 只留 alias——两者本就是同一会话，避免内容被覆盖
+    sessionViews.delete(oldKey);
+    viewAlias.set(oldKey, newKey);
+    return;
+  }
   sessionViews.delete(oldKey);
-  sessionViews.set(newKey, v);
+  sessionViews.set(newKey, src);
+  viewAlias.set(oldKey, newKey);
   if (activeSessionKey === oldKey) activeSessionKey = newKey;
 }
 
@@ -276,8 +303,9 @@ ws.onmessage = (ev) => {
     // 切回时直接看到后台继续跑出来的内容，不丢。
     const target = msg.session || activeSessionKey;
     handleRecordForSession(target, msg.record);
-    // 后台完成一轮 → 未读角标 +1
-    if (target !== activeSessionKey && msg.record && msg.record.type === "agent_settled") {
+    // 后台完成一条 assistant 消息 → 未读角标 +1（一轮一条，不重复计数）
+    if (target !== activeSessionKey && msg.record && msg.record.type === "message_end"
+        && msg.record.message && msg.record.message.role === "assistant") {
       const v = ensureView(target);
       v.unread = (v.unread || 0) + 1;
       renderSessionList();
@@ -310,6 +338,7 @@ function rpc(command) {
 /** 进程池状态 → 侧栏「运行中」动效 */
 function applyPoolState(msg) {
   if (!msg || !Array.isArray(msg.sessions)) return;
+  poolSupported = true;
   poolBusy.clear();
   for (const s of msg.sessions) poolBusy.set(s.session, !!s.busy);
   renderSessionList();
@@ -417,6 +446,33 @@ function handleRecord(rec) {
   }
 }
 
+function finishPendingNewSession() {
+  // v0.6.2: 新会话不继承旧队列
+  if (followUpQueue.length) { followUpQueue = []; renderQueueChips(); addSystemNote("已清空 steer 队列（新会话）"); }
+  messagesEl.innerHTML = "";
+  streamingEl = null;
+  streamingBlocks = [];
+  sessionUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 };
+  lastUsage = null;
+  lastContextTokens = 0;
+  sessionStartedAt = Date.now();
+  pendingNewSession = false;
+  // v0.7: 懒创建 flush——会话已建好，自动发出暂存的首条消息
+  const fp = pendingFirstPrompt;
+  pendingFirstPrompt = null;
+  rpc({ type: "get_state" });
+  rpc({ type: "get_commands" });
+  refreshSessionsFromServer();
+  if (fp) {
+    // 上面的清空把发送时渲染的用户气泡删了——重建（消息属于新会话）
+    addUserMessageWithAttachments(fp.message, fp.atts || []);
+    const pcmd = { type: "prompt", message: fp.message };
+    if (fp.images && fp.images.length) pcmd.images = fp.images;
+    rpc(pcmd);
+    addSystemNote("新会话已创建，首条消息已自动发送");
+  }
+}
+
 function handleResponse(rec) {
   if (!rec.success) {
     addSystemNote(`错误: ${rec.error}`);
@@ -436,13 +492,10 @@ function handleResponse(rec) {
       }
       updateStats(d.messageCount);
       updateStatusBar();
-      // v0.9: 临时 key（new:<ts>）/ 默认 key 拿到真实会话文件 → 重映射，
-      // 避免同一会话两个 key（内容分裂）
+      // v0.9: 视图始终跟随真实会话文件。注意 pi 会在收到首条 prompt 时替换
+      // new_session 建的文件（空会话会被轮换），所以不能只处理 default/new:<ts>。
       const sf = d.sessionFile || null;
-      if (sf && sf !== activeSessionKey
-          && (activeSessionKey === "default" || activeSessionKey.startsWith("new:"))) {
-        rekeySessionView(activeSessionKey, sf);
-      }
+      if (sf && sf !== activeSessionKey) rekeySessionView(activeSessionKey, sf);
       currentSessionPath = sf;
       if (pendingNewSession) {
         // v0.7: 懒创建态——get_state 返回的还是旧会话信息，不覆盖 pending 状态
@@ -459,6 +512,11 @@ function handleResponse(rec) {
       }
       updateChatHeader();
       highlightActiveSession();
+      // v0.9 pool 模式：新会话的 flush 由 get_state 触发（server 已建好全新会话）
+      if (pendingNewSession && pendingFirstPrompt && poolSupported && currentSessionPath) {
+        finishPendingNewSession();
+        break;
+      }
       // 刷新页面后：消息面板还是欢迎页时，自动把当前会话的历史加载出来，
       // 这样即使不点击会话（或点的就是当前会话）也能看到内容。
       if (!historyLoadedOnce && currentSessionPath && messagesEl.querySelector(".empty-hint")) {
@@ -522,30 +580,7 @@ function handleResponse(rec) {
         addSystemNote("新建会话被取消（扩展拦截）");
         pendingFirstPrompt = null; // 懒创建被拦：首条消息随取消丢弃，恢复可重发
       } else {
-        // v0.6.2: 新会话不继承旧队列
-        if (followUpQueue.length) { followUpQueue = []; renderQueueChips(); addSystemNote("已清空 steer 队列（新会话）"); }
-        messagesEl.innerHTML = "";
-        streamingEl = null;
-        streamingBlocks = [];
-        sessionUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 };
-        lastUsage = null;
-        lastContextTokens = 0;
-        sessionStartedAt = Date.now();
-        pendingNewSession = false;
-        // v0.7: 懒创建 flush——会话已建好，自动发出暂存的首条消息
-        const fp = pendingFirstPrompt;
-        pendingFirstPrompt = null;
-        rpc({ type: "get_state" });
-        rpc({ type: "get_commands" });
-        refreshSessionsFromServer();
-        if (fp) {
-          // 上面的清空把发送时渲染的用户气泡删了——重建（消息属于新会话）
-          addUserMessageWithAttachments(fp.message, fp.atts || []);
-          const pcmd = { type: "prompt", message: fp.message };
-          if (fp.images && fp.images.length) pcmd.images = fp.images;
-          rpc(pcmd);
-          addSystemNote("新会话已创建，首条消息已自动发送");
-        }
+        finishPendingNewSession();
       }
       break;
     case "get_messages":
@@ -1243,7 +1278,7 @@ function renderSessionList() {
       const active = s.path === activeSessionKey ? "active" : "";
       // v0.9: 运行中动效 + 后台未读角标
       const running = isSessionBusy(s.path) ? " running" : "";
-      const v = sessionViews.get(s.path);
+      const v = sessionViews.get(resolveViewKey(s.path));
       const unread = (v && v.unread) ? `<span class="s-unread">${v.unread > 99 ? "99+" : v.unread}</span>` : "";
       const safePath = escapeHtml(s.path);
       const safeId = escapeHtml(s.id);
@@ -1841,10 +1876,12 @@ function sendMessage() {
     renderQueueChips();
   } else if (pendingNewSession) {
     // v0.7: 懒创建态——先发 new_session（pi 会落盘建文件），暂存本条消息，
-    // new_session 响应回来后自动发出。避免"点了新建却不发消息"产生空文件。
-    // atts 一并暂存：new_session 响应会清空消息区，flush 时靠它重建用户气泡。
+    // new_session 响应回来后自动发出。避免“点了新建却不发消息”产生空文件。
+    // v0.9: 支持会话进程池的 server 已为 new:<ts> key 拉起「全新会话」进程
+    // （spawn 时主动 new_session），这里不再发（否则多出一个空文件）。
     pendingFirstPrompt = { message: promptText, images, atts: sentAttachments };
-    rpc({ type: "new_session" });
+    if (!poolSupported) rpc({ type: "new_session" });
+    else rpc({ type: "get_state" }); // 顺带让 server 完成 key→真实路径映射
   } else {
     const cmd = { type: "prompt", message: promptText };
     if (images.length) cmd.images = images;
@@ -2363,7 +2400,19 @@ function extToast(message, type) {
 // v0.7: trace.js 读取当前会话文件路径（轨迹面板数据源）
 window.__piwebui_state = { getSessionPath: () => currentSessionPath };
 
+// v0.9: 会话视图/进程池调试与探针钩子
+window.__piwebui_pool = {
+  activeKey: () => activeSessionKey,
+  views: () => [...sessionViews.keys()],
+  busy: () => Object.fromEntries(poolBusy),
+  unread: () => Object.fromEntries([...sessionViews].map(([k, v]) => [k, v.unread || 0])),
+  viewKeys: () => [...sessionViews.keys()],
+  viewText: (key) => { const v = sessionViews.get(resolveViewKey(key)); return v ? (v.el.textContent || "") : ""; },
+  viewCount: () => sessionViews.size,
+};
+
 window.__piwebui_test = {
+  activeKey: () => activeSessionKey,
   handleExtensionUiRequest,
   extRespond,
   queue: {
