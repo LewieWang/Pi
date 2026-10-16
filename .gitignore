@@ -8,6 +8,7 @@ dist/
 *.log
 *.tmp
 .DS_Store
+.pi-uploads/
 
 # Env / secrets
 .env
