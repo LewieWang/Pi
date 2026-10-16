@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pi WebUI</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%236366f1'/><text x='16' y='23' font-size='19' font-family='Georgia,serif' fill='white' text-anchor='middle'>&#960;</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 侧边栏 -->
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <h1>π Pi WebUI</h1>
+      <div id="pi-status" class="status offline">未连接</div>
+    </div>
+    <button id="btn-new-session" class="btn-new">＋ 新会话</button>
+
+    <div class="sidebar-section sessions-section">
+      <div class="section-title-row">
+        <span class="section-title">历史会话</span>
+        <button id="btn-refresh-sessions" class="icon-btn" title="刷新">⟳</button>
+      </div>
+      <input id="session-search" class="search-input" placeholder="搜索会话..." />
+      <div id="session-list" class="session-list">
+        <div class="session-empty">暂无历史会话</div>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="section-title">模型</div>
+      <select id="model-select"></select>
+    </div>
+    <div class="sidebar-section">
+      <div class="section-title">工作目录</div>
+      <div id="cwd" class="cwd">-</div>
+    </div>
+    <!-- 本次会话 stats 区块已移除：token 消耗改为每轮对话结束后在聊天区展示面板 -->
+    <div class="sidebar-footer">Pi RPC 桥接 · v0.7 (源头防空会话 + 懒创建 + 启动清扫)</div>
+  </aside>
+
+  <!-- 主聊天区 -->
+  <main id="chat">
+    <div id="chat-header">
+      <div class="chat-header-main">
+        <span id="chat-title" class="chat-title">当前会话</span>
+        <span id="chat-sub" class="chat-sub"></span>
+      </div>
+      <div class="chat-header-actions">
+        <button id="btn-trace" class="btn-ghost" title="轨迹审计（全量事件时间线）">≡ 轨迹</button>
+        <button id="btn-rename" class="btn-ghost" title="重命名">✎ 重命名</button>
+        <button id="btn-compact" class="btn-ghost" title="压缩上下文">⊟ 压缩</button>
+        <button id="btn-export" class="btn-ghost" title="导出 HTML">⎘ 导出</button>
+      </div>
+    </div>
+    <!-- v0.5: 顶部状态栏（模型 / 上下文占用 / 累计 tokens） -->
+    <div id="statusbar" class="statusbar" hidden></div>
+    <div id="messages"></div>
+    <div id="tool-activity"></div>
+    <!-- v0.6: 扩展挂件（extension_ui setWidget，显示在输入框上方） -->
+    <div id="ext-widgets" class="ext-widget-area" hidden></div>
+    <div id="composer">
+      <!-- v0.6.2: steer 队列 chips（流式中排队的消息，可移除） -->
+      <div id="queue-chips" class="queue-chips" hidden></div>
+      <div id="composer-chips" class="composer-chips" hidden></div>
+      <textarea id="input" placeholder="给 Pi 发消息… (Enter 发送, Shift+Enter 换行)" rows="1"></textarea>
+      <div class="composer-toolbar">
+        <div class="toolbar-left">
+          <input type="file" id="file-input" multiple hidden>
+          <input type="file" id="image-input" accept="image/*" multiple hidden>
+          <button id="btn-attach-file" class="tool-btn" title="添加文件（任意类型）">📎 文件</button>
+          <button id="btn-attach-image" class="tool-btn" title="添加图片">🖼 图片</button>
+          <button id="btn-pick-skill" class="tool-btn" title="选择 Skill">@ Skill ▼</button>
+          <span id="upload-hint" class="upload-hint"></span>
+        </div>
+        <div class="toolbar-right">
+          <button id="btn-abort" class="btn-secondary" title="中断当前任务">■ 中断</button>
+          <button id="btn-send" class="btn-primary">发送</button>
+        </div>
+      </div>
+      <div id="skill-popover" class="skill-popover" hidden>
+        <input id="skill-search" class="skill-search" placeholder="搜索 Skill..." />
+        <div id="skill-list" class="skill-list"></div>
+        <div id="skill-empty" class="skill-empty" hidden>暂无 Skill</div>
+      </div>
+      <!-- v0.4: / 命令实时补全 -->
+      <div id="cmd-popover" class="cmd-popover" hidden>
+        <div id="cmd-list" class="cmd-list"></div>
+        <div id="cmd-empty" class="cmd-empty" hidden>暂无匹配命令</div>
+      </div>
+    </div>
+
+    <!-- v0.4: 图片灯箱 -->
+    <div id="lightbox" class="lightbox" hidden>
+      <div class="lightbox-backdrop"></div>
+      <button class="lightbox-close" title="关闭 (Esc)">×</button>
+      <button class="lightbox-prev" title="上一张 (←)">‹</button>
+      <button class="lightbox-next" title="下一张 (→)">›</button>
+      <div class="lightbox-content">
+        <img id="lightbox-img" alt="" />
+        <div id="lightbox-caption" class="lightbox-caption"></div>
+      </div>
+    </div>
+
+    <!-- v0.6: 扩展 UI 交互（extension_ui_request：dialog/toast/状态条） -->
+    <div id="ext-dialog" class="ext-dialog" hidden>
+      <div class="ext-dialog-backdrop"></div>
+      <div class="ext-dialog-card">
+        <div id="ext-dialog-title" class="ext-dialog-title"></div>
+        <div id="ext-dialog-message" class="ext-dialog-message md-body"></div>
+        <input id="ext-dialog-text" class="ext-dialog-text" hidden />
+        <textarea id="ext-dialog-area" class="ext-dialog-area" rows="6" hidden></textarea>
+        <div id="ext-dialog-options" class="ext-dialog-options"></div>
+      </div>
+    </div>
+    <div id="ext-toast-wrap" class="ext-toast-wrap"></div>
+    <div id="ext-status-strip" class="ext-status-strip" hidden></div>
+  </main>
+</div>
+<script src="markdown.js"></script>
+<script src="trace.js"></script>
+<script src="files.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

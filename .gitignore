@@ -1,0 +1,5 @@
+node_modules/
+sessions/
+.pi-uploads/
+*.log
+server.js.bak
